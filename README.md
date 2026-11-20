@@ -3,6 +3,8 @@
 A frosted-glass photo library and viewer, built in Rust on top of
 [Oculante](https://github.com/woelper/oculante).
 
+**Fork:** <https://github.com/adithya-s-119/oculante>
+
 This fork replaces the single-image window with a Microsoft Photos Legacy–style
 experience while keeping Oculante's hardware-accelerated image pipeline:
 
@@ -33,9 +35,10 @@ cargo run --release -- --gallery
 ```
 
 `--gallery` opens the library directly. Passing a file or folder still opens it
-in the viewer, just like upstream Oculante. On Windows, an MSVC toolchain and
-NASM (for the JPEG/AVIF codecs) are required; on Linux/macOS use the upstream
-build dependencies. See `res/models/README.md` for classifier provenance.
+in the viewer, just like upstream Oculante. On Windows, a Rust toolchain (MSVC
+or GNU) and NASM (for the JPEG/AVIF codecs) are required; on Linux/macOS use the
+upstream build dependencies. See `res/models/README.md` for classifier
+provenance.
 
 ### Photos shortcuts
 
