@@ -640,7 +640,7 @@ pub fn toggle_fullscreen(app: &mut App, state: &mut OculanteState) {
     app.window().set_fullscreen(!fullscreen);
 }
 
-/// Determine if an enxtension is compatible with oculante
+/// Determine if an extension is compatible with Pictor
 pub fn is_ext_compatible(fname: &Path) -> bool {
     SUPPORTED_EXTENSIONS.contains(
         &fname
@@ -912,9 +912,9 @@ pub fn prev_image(state: &mut OculanteState) {
 /// Set the window title
 pub fn set_title(app: &mut App, state: &mut OculanteState) {
     if state.gallery.view == crate::ui::photos::PhotosView::Gallery {
-        let already_photos = app.backend.window().title() == "Photos";
-        if !already_photos {
-            app.backend.window().set_title("Photos");
+        let already_pictor = app.backend.window().title() == crate::APP_NAME;
+        if !already_pictor {
+            app.backend.window().set_title(crate::APP_NAME);
         }
         return;
     }
@@ -924,7 +924,7 @@ pub fn set_title(app: &mut App, state: &mut OculanteState) {
     let mut title_string = state
         .persistent_settings
         .title_format
-        .replacen("{APP}", "Photos", 10)
+        .replacen("{APP}", crate::APP_NAME, 10)
         .replacen("{VERSION}", env!("CARGO_PKG_VERSION"), 10)
         .replacen("{FULLPATH}", &format!("{}", p.display()), 10)
         .replacen(

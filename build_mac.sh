@@ -16,14 +16,14 @@ cargo bundle --release --features "notan/shaderc heif"
 # cargo build --release --target aarch64-apple-darwin --features "notan/shaderc heif"
 # cargo build --release --target x86_64-apple-darwin --features notan/shaderc
 echo otool for aarch64:
-otool -L target/aarch64-apple-darwin/release/oculante
-# lipo -create -output target/release/bundle/osx/oculante.app/Contents/MacOS/oculante target/x86_64-apple-darwin/release/oculante target/aarch64-apple-darwin/release/oculante 
-file target/release/bundle/osx/oculante.app/Contents/MacOS/oculante
+otool -L target/aarch64-apple-darwin/release/pictor
+# lipo -create -output target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor target/x86_64-apple-darwin/release/pictor target/aarch64-apple-darwin/release/pictor
+file target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor
 # echo otool for universal binary:
-# otool -L target/release/bundle/osx/oculante.app/Contents/MacOS/oculante
+# otool -L target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor
 
-mkdir target/release/bundle/osx/oculante.app/Contents/Frameworks/
-chmod +rw target/release/bundle/osx/oculante.app/Contents/Frameworks/*
+mkdir target/release/bundle/osx/Pictor.app/Contents/Frameworks/
+chmod +rw target/release/bundle/osx/Pictor.app/Contents/Frameworks/*
 
 # x265 changes its library name with every release, so look it up
 X265=$(ls /opt/homebrew/opt/x265/lib/libx265.[0-9]*.dylib)
@@ -38,45 +38,45 @@ for lib in ${libs[@]}
 do
     echo COPY $lib
     # deploy lib
-    cp $lib target/release/bundle/osx/oculante.app/Contents/Frameworks/
-    install_name_tool -add_rpath "@executable_path/../Frameworks/$(basename $lib)" target/release/bundle/osx/oculante.app/Contents/MacOS/oculante
-    # install_name_tool -change $lib "@executable_path/../Frameworks/$(basename $lib)" target/release/bundle/osx/oculante.app/Contents/MacOS/oculante
+    cp $lib target/release/bundle/osx/Pictor.app/Contents/Frameworks/
+    install_name_tool -add_rpath "@executable_path/../Frameworks/$(basename $lib)" target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor
+    # install_name_tool -change $lib "@executable_path/../Frameworks/$(basename $lib)" target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor
 
 done
 
-install_name_tool -change $X265 "@executable_path/../Frameworks/$(basename $X265)" target/release/bundle/osx/oculante.app/Contents/Frameworks/libheif.1.dylib
-install_name_tool -change /opt/homebrew/lib/$(basename $X265) "@executable_path/../Frameworks/$(basename $X265)" target/release/bundle/osx/oculante.app/Contents/Frameworks/libheif.1.dylib
-install_name_tool -change /opt/homebrew/opt/libde265/lib/libde265.0.dylib "@executable_path/../Frameworks/libde265.0.dylib"     target/release/bundle/osx/oculante.app/Contents/Frameworks/libheif.1.dylib
-install_name_tool -change /opt/homebrew/opt/libheif/lib/libheif.1.dylib "@executable_path/../Frameworks/libheif.1.dylib"        target/release/bundle/osx/oculante.app/Contents/MacOS/oculante
-install_name_tool -change /opt/homebrew/opt/aom/lib/libaom.3.dylib "@executable_path/../Frameworks/libaom.3.dylib"              target/release/bundle/osx/oculante.app/Contents/Frameworks/libheif.1.dylib
-install_name_tool -change /opt/homebrew/opt/webp/lib/libsharpyuv.0.dylib "@executable_path/../Frameworks/libsharpyuv.0.dylib"   target/release/bundle/osx/oculante.app/Contents/Frameworks/libheif.1.dylib
-install_name_tool -change /opt/homebrew/opt/libvmaf/lib/libvmaf.3.dylib "@executable_path/../Frameworks/libvmaf.3.dylib"        target/release/bundle/osx/oculante.app/Contents/Frameworks/libaom.3.dylib
+install_name_tool -change $X265 "@executable_path/../Frameworks/$(basename $X265)" target/release/bundle/osx/Pictor.app/Contents/Frameworks/libheif.1.dylib
+install_name_tool -change /opt/homebrew/lib/$(basename $X265) "@executable_path/../Frameworks/$(basename $X265)" target/release/bundle/osx/Pictor.app/Contents/Frameworks/libheif.1.dylib
+install_name_tool -change /opt/homebrew/opt/libde265/lib/libde265.0.dylib "@executable_path/../Frameworks/libde265.0.dylib"     target/release/bundle/osx/Pictor.app/Contents/Frameworks/libheif.1.dylib
+install_name_tool -change /opt/homebrew/opt/libheif/lib/libheif.1.dylib "@executable_path/../Frameworks/libheif.1.dylib"        target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor
+install_name_tool -change /opt/homebrew/opt/aom/lib/libaom.3.dylib "@executable_path/../Frameworks/libaom.3.dylib"              target/release/bundle/osx/Pictor.app/Contents/Frameworks/libheif.1.dylib
+install_name_tool -change /opt/homebrew/opt/webp/lib/libsharpyuv.0.dylib "@executable_path/../Frameworks/libsharpyuv.0.dylib"   target/release/bundle/osx/Pictor.app/Contents/Frameworks/libheif.1.dylib
+install_name_tool -change /opt/homebrew/opt/libvmaf/lib/libvmaf.3.dylib "@executable_path/../Frameworks/libvmaf.3.dylib"        target/release/bundle/osx/Pictor.app/Contents/Frameworks/libaom.3.dylib
 
 for lib in ${libs[@]}
 do
     # sign lib
     echo SIGN $lib
-    codesign -s "-" -fv target/release/bundle/osx/oculante.app/Contents/Frameworks/$(basename $lib)
+    codesign -s "-" -fv target/release/bundle/osx/Pictor.app/Contents/Frameworks/$(basename $lib)
 done
 
-cp Info.plist target/release/bundle/osx/oculante.app/Contents/Info.plist
+cp Info.plist target/release/bundle/osx/Pictor.app/Contents/Info.plist
 
 echo try this to test the build:
 echo brew uninstall libheif ffmpeg
 brew uninstall libheif ffmpeg
-echo you can test target/release/bundle/osx/oculante.app now
+echo you can test target/release/bundle/osx/Pictor.app now
 
-otool -L target/release/bundle/osx/oculante.app/Contents/MacOS/oculante
-otool -L target/release/bundle/osx/oculante.app/Contents/Frameworks/libheif.1.dylib
+otool -L target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor
+otool -L target/release/bundle/osx/Pictor.app/Contents/Frameworks/libheif.1.dylib
 
 # The app must not depend on anything from Homebrew that is not in the bundle,
 # it would crash on machines without it (#810).
-if otool -L target/release/bundle/osx/oculante.app/Contents/MacOS/oculante | grep /opt/homebrew; then
+if otool -L target/release/bundle/osx/Pictor.app/Contents/MacOS/pictor | grep /opt/homebrew; then
     echo "The app still links a Homebrew library that is not bundled"
     exit 1
 fi
 # The first two lines are the file name and the library's own id
-if otool -L target/release/bundle/osx/oculante.app/Contents/Frameworks/libheif.1.dylib | tail -n +3 | grep /opt/homebrew; then
+if otool -L target/release/bundle/osx/Pictor.app/Contents/Frameworks/libheif.1.dylib | tail -n +3 | grep /opt/homebrew; then
     echo "libheif still links a Homebrew library that is not bundled"
     exit 1
 fi

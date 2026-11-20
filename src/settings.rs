@@ -1,6 +1,6 @@
 use crate::{file_encoder::FileEncoder, shortcuts::*, utils::ColorChannel};
 use anyhow::{anyhow, Result};
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use notan::egui::{Context, Visuals};
 use serde::{Deserialize, Serialize};
 
@@ -17,10 +17,71 @@ use std::{
     path::PathBuf,
 };
 
-fn get_config_dir() -> Result<PathBuf> {
+const LEGACY_APP_ID: &str = "oculante";
+
+fn get_config_dir_for(id: &str) -> Result<PathBuf> {
     Ok(dirs::data_local_dir()
         .ok_or(anyhow!("Can't get local dir"))?
-        .join("oculante"))
+        .join(id))
+}
+
+fn get_config_dir() -> Result<PathBuf> {
+    get_config_dir_for(crate::APP_ID)
+}
+
+fn get_legacy_config_dir() -> Result<PathBuf> {
+    get_config_dir_for(LEGACY_APP_ID)
+}
+
+fn migrate_dir(old: PathBuf, new: PathBuf) {
+    if new.exists() || !old.exists() {
+        return;
+    }
+    if let Some(parent) = new.parent() {
+        let _ = create_dir_all(parent);
+    }
+    match std::fs::rename(&old, &new) {
+        Ok(()) => info!("Migrated {} to {}", old.display(), new.display()),
+        Err(e) => warn!(
+            "Could not migrate data from {} to {}: {e}",
+            old.display(),
+            new.display()
+        ),
+    }
+}
+
+/// Move settings and thumbnail caches from the old Oculante folder to the
+/// Pictor folder. Called once before settings are loaded.
+pub fn migrate_legacy_data() {
+    if let (Ok(old), Ok(new)) = (get_legacy_config_dir(), get_config_dir()) {
+        migrate_dir(old, new);
+    }
+
+    // Linux and macOS keep caches outside the data directory. On Windows this
+    // is the same parent as above, so the check is a no-op after the rename.
+    if let Some(cache) = dirs::cache_dir() {
+        migrate_dir(cache.join(LEGACY_APP_ID), cache.join(crate::APP_ID));
+    }
+}
+
+fn resolve_config_path(file: &str) -> Result<PathBuf> {
+    let current = get_config_dir()?.join(file);
+    if current.exists() {
+        return Ok(current);
+    }
+    let legacy = get_legacy_config_dir()?.join(file);
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    // Ancient upstream Oculante config file.
+    if file == "config.json" {
+        if let Some(old) = dirs::config_local_dir().map(|d| d.join(".oculante")) {
+            if old.exists() {
+                return Ok(old);
+            }
+        }
+    }
+    Ok(current)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -98,7 +159,7 @@ impl Default for PersistentSettings {
             show_scrub_bar: Default::default(),
             wrap_folder: true,
             keep_edits: Default::default(),
-            title_format: "{FILENAME} - Photos".into(),
+            title_format: "{FILENAME} - Pictor".into(),
             info_enabled: Default::default(),
             edit_enabled: Default::default(),
             show_checker_background: Default::default(),
@@ -124,15 +185,7 @@ impl Default for PersistentSettings {
 
 impl PersistentSettings {
     pub fn load() -> Result<Self> {
-        let config_path = get_config_dir()?
-            .join("config.json")
-            .canonicalize()
-            // migrate old config
-            .unwrap_or(
-                dirs::config_local_dir()
-                    .ok_or(anyhow!("Can't get config_local_dir"))?
-                    .join(".oculante"),
-            );
+        let config_path = resolve_config_path("config.json")?;
         debug!("Loaded persistent settings: {}", config_path.display());
 
         Ok(serde_json::from_reader::<_, PersistentSettings>(
@@ -191,11 +244,7 @@ impl Default for VolatileSettings {
 
 impl VolatileSettings {
     pub fn load() -> Result<Self> {
-        let config_path = get_config_dir()?
-            .join("config_volatile.json")
-            .canonicalize()
-            // migrate old config
-            ?;
+        let config_path = resolve_config_path("config_volatile.json")?;
 
         let s = serde_json::from_reader::<_, VolatileSettings>(File::open(config_path)?)?;
         info!("Loaded volatile settings.");

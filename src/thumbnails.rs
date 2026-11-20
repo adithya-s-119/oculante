@@ -11,6 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{create_dir_all, File},
     hash::{DefaultHasher, Hash, Hasher},
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -50,13 +51,42 @@ impl Thumbnails {
     /// Request the large gallery thumbnail. It is generated on a background
     /// thread and returned on a later frame.
     pub fn get_gallery<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
-        self.get_sized(path, GALLERY_THUMB_SIZE, "_gallery")
+        self.get_gallery_for_display(path, true)
     }
 
-    /// Small thumbnail for the AI classifier. Reuses an existing gallery
-    /// thumbnail when possible, otherwise generates a cheap 224x168 copy.
+    /// Gallery thumbnail with an embedded-preview fast path.
+    ///
+    /// When `allow_full` is false (during scrolling) the cheap camera preview
+    /// is used without starting a full-size decode. Once scrolling stops the
+    /// caller sets it to true and the high-quality thumbnail is generated.
+    pub fn get_gallery_for_display<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        allow_full: bool,
+    ) -> Result<PathBuf> {
+        let source = path.as_ref();
+        let gallery = self.known_path(source, "_gallery");
+        if gallery.exists() {
+            return Ok(gallery);
+        }
+        let preview = self.known_path(source, "_preview");
+        if preview.exists() {
+            if allow_full {
+                let _ = self.get_sized(source, GALLERY_THUMB_SIZE, "_gallery");
+            }
+            return Ok(preview);
+        }
+
+        // Start a cheap embedded-EXIF preview job. If the JPEG has no embedded
+        // preview, the job falls back to generating the full gallery image.
+        self.start_preview_job(source, GALLERY_THUMB_SIZE)?;
+        bail!("Thumbnail not yet present.");
+    }
+
+    /// Small thumbnail for the AI classifier. Reuses an existing gallery or
+    /// preview, otherwise generates a cheap 224x168 copy.
     pub fn get_analysis<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
-        if let Some(existing) = self.existing_gallery(path.as_ref()) {
+        if let Some(existing) = self.existing_analysis(path.as_ref()) {
             return Ok(existing);
         }
         self.get_sized(path, ANALYSIS_THUMB_SIZE, "_ml")
@@ -68,6 +98,10 @@ impl Thumbnails {
         if let Some(existing) = self.existing_gallery(path.as_ref()) {
             return Some(existing);
         }
+        let preview = self.known_path(path.as_ref(), "_preview");
+        if preview.exists() {
+            return Some(preview);
+        }
         let cached = self.known_path(path.as_ref(), "_ml");
         cached.exists().then_some(cached)
     }
@@ -75,6 +109,58 @@ impl Thumbnails {
     pub fn existing_gallery<P: AsRef<Path>>(&mut self, path: P) -> Option<PathBuf> {
         let cached = self.known_path(path.as_ref(), "_gallery");
         cached.exists().then_some(cached)
+    }
+
+    fn start_preview_job(&mut self, source: &Path, target: [u32; 2]) -> Result<()> {
+        if !get_disk_cache_path()?.exists() {
+            create_dir_all(get_disk_cache_path()?)?;
+        }
+        let preview_path = self.known_path(source, "_preview");
+        if self.ids.contains(&preview_path) {
+            bail!("Preview is still processing or failed in the past.");
+        }
+        let slot = {
+            let mut jobs = self.pool.lock().unwrap();
+            if *jobs >= MAX_THREADS {
+                bail!("Thumbnail pool is busy.");
+            }
+            *jobs += 1;
+            JobSlot(self.pool.clone())
+        };
+        let source = source.to_path_buf();
+        let job_preview_path = preview_path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("photos-preview".into())
+            .spawn(move || {
+                let _slot = slot;
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                        if let Some(preview) = embedded_jpeg_preview(&source) {
+                            if from_existing_sized(&job_preview_path, &preview, target).is_ok() {
+                                debug!(
+                                    "Embedded EXIF preview {}x{} used for {}",
+                                    preview.width(),
+                                    preview.height(),
+                                    source.display()
+                                );
+                                return Ok(());
+                            }
+                        }
+                        // No embedded preview (or it could not be used): go
+                        // straight to the full gallery thumbnail.
+                        generate_sized(&source, target, "_gallery")
+                    }));
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!("Error generating thumbnail preview: {e}"),
+                    Err(_) => error!("Thumbnail preview decoder panicked"),
+                }
+            });
+        if let Err(e) = spawned {
+            bail!("Could not start preview worker: {e}");
+        }
+        self.ids.insert(preview_path);
+        bail!("Thumbnail not yet present.");
     }
 
     fn known_path(&mut self, path: &Path, suffix: &str) -> PathBuf {
@@ -165,7 +251,7 @@ pub fn path_to_id<P: AsRef<Path>>(path: P) -> PathBuf {
 pub fn get_disk_cache_path() -> Result<PathBuf> {
     Ok(dirs::cache_dir()
         .ok_or(anyhow!("Can't get cache dir"))?
-        .join("oculante")
+        .join(crate::APP_ID)
         .join("thumbnails"))
 }
 
@@ -200,6 +286,16 @@ pub fn generate_sized<P: AsRef<Path>>(source_path: P, size: [u32; 2], suffix: &s
         dest_path.display()
     );
 
+    // Small thumbnails can often come straight from a camera's embedded EXIF
+    // preview. Reading ~128 KB is dramatically cheaper than decoding the full
+    // photo on a slow USB drive.
+    if suffix != "_gallery" {
+        if let Some(preview) = embedded_jpeg_preview(source_path.as_ref()) {
+            from_existing_sized(dest_path, &preview, size)?;
+            return Ok(());
+        }
+    }
+
     // JPEGs are by far the most common format on photo drives. Decode them
     // directly at a reduced DCT scale instead of decoding 20+ megapixels and
     // then throwing most of them away. This is 4-48x less pixel work for
@@ -217,6 +313,74 @@ pub fn generate_sized<P: AsRef<Path>>(source_path: P, size: [u32; 2], suffix: &s
 
     from_existing_sized(dest_path, &i, size)?;
     Ok(())
+}
+
+/// Extract the small JPEG preview that most cameras and phones embed in the
+/// EXIF APP1 segment. Only the first 128 KB of the file is read.
+fn embedded_jpeg_preview(source: &Path) -> Option<DynamicImage> {
+    let ext = source.extension()?.to_string_lossy().to_ascii_lowercase();
+    if ext != "jpg" && ext != "jpeg" {
+        return None;
+    }
+    let mut data = Vec::with_capacity(128 * 1024);
+    File::open(source)
+        .ok()?
+        .take(128 * 1024)
+        .read_to_end(&mut data)
+        .ok()?;
+    let tiff = jpeg_exif_tiff(&data)?;
+    let exif = exif::Reader::new().read_raw(tiff.to_vec()).ok()?;
+    let offset = exif
+        .get_field(exif::Tag::JPEGInterchangeFormat, exif::In::THUMBNAIL)?
+        .value
+        .get_uint(0)? as usize;
+    let length = exif
+        .get_field(exif::Tag::JPEGInterchangeFormatLength, exif::In::THUMBNAIL)?
+        .value
+        .get_uint(0)? as usize;
+    let thumbnail = exif.buf().get(offset..offset.checked_add(length)?)?;
+    image::load_from_memory(thumbnail).ok()
+}
+
+/// Return the TIFF payload of the first APP1 EXIF segment of a JPEG.
+fn jpeg_exif_tiff(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            return None;
+        }
+        let mut marker = data[i + 1];
+        while marker == 0xFF {
+            i += 1;
+            if i + 1 >= data.len() {
+                return None;
+            }
+            marker = data[i + 1];
+        }
+        match marker {
+            0xD8 | 0x01 | 0xD0..=0xD7 => {
+                i += 2;
+                continue;
+            }
+            0xDA => return None,
+            _ => {}
+        }
+        let len = ((data[i + 2] as usize) << 8) | data[i + 3] as usize;
+        if len < 2 || i + 2 + len > data.len() {
+            return None;
+        }
+        if marker == 0xE1 {
+            let payload = &data[i + 4..i + 2 + len];
+            if payload.starts_with(b"Exif\0\0") {
+                return Some(&payload[6..]);
+            }
+        }
+        i += 2 + len;
+    }
+    None
 }
 
 #[cfg(feature = "turbo")]

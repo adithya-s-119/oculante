@@ -15,7 +15,7 @@ fn gh_update() -> Result<String, Box<dyn std::error::Error>> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner("adithya-s-119")
         .repo_name("oculante")
-        .bin_name("oculante")
+        .bin_name("pictor")
         .target(target)
         .current_version(cargo_crate_version!())
         .no_confirm(true)

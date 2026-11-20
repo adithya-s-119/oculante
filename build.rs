@@ -133,6 +133,10 @@ fn main() {
     if cfg!(target_os = "windows") {
         let mut res = winres::WindowsResource::new();
         res.set_icon("icon.ico");
+        res.set("ProductName", "Pictor");
+        res.set("FileDescription", "Pictor Photo Library");
+        res.set("InternalName", "pictor");
+        res.set("OriginalFilename", "pictor.exe");
         _ = res.compile();
     }
 

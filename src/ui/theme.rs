@@ -18,7 +18,7 @@ pub fn apply_theme(state: &mut OculanteState, ctx: &Context) {
         },
     };
 
-    // Migrate the old Oculante defaults so this fork opens with the Photos
+    // Migrate the old Oculante defaults so this fork opens with the Pictor
     // palette on an existing installation.
     if state.persistent_settings.accent_color == [255, 0, 75] {
         state.persistent_settings.accent_color = PersistentSettings::default().accent_color;
@@ -26,7 +26,9 @@ pub fn apply_theme(state: &mut OculanteState, ctx: &Context) {
     if state.persistent_settings.background_color == [30, 30, 30] {
         state.persistent_settings.background_color = PersistentSettings::default().background_color;
     }
-    if state.persistent_settings.title_format == "{APP} | {VERSION} | {FULLPATH}" {
+    if state.persistent_settings.title_format == "{APP} | {VERSION} | {FULLPATH}"
+        || state.persistent_settings.title_format == "{FILENAME} - Photos"
+    {
         state.persistent_settings.title_format = PersistentSettings::default().title_format;
     }
     if state.persistent_settings.min_window_size == (100, 100) {

@@ -123,6 +123,8 @@ pub struct GalleryState {
     /// 20k-photo drive can consume gigabytes of GPU memory.
     photo_textures: HashMap<String, u64>,
     photo_texture_seq: u64,
+    last_scroll_y: f32,
+    scrolling_until: Instant,
     pub filmstrip_index: Option<usize>,
 }
 
@@ -171,6 +173,8 @@ impl Default for GalleryState {
             scan_tag: None,
             photo_textures: HashMap::new(),
             photo_texture_seq: 0,
+            last_scroll_y: 0.0,
+            scrolling_until: Instant::now(),
             filmstrip_index: None,
         }
     }
@@ -1169,7 +1173,7 @@ fn top_bar(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
             paint_logo(ui, palette);
             ui.add_space(9.0);
             ui.label(
-                RichText::new("Photos")
+                RichText::new(crate::APP_NAME)
                     .size(18.0)
                     .family(FontFamily::Name("bold".into()))
                     .color(palette.text),
@@ -2283,6 +2287,12 @@ fn photo_grid(ui: &mut Ui, state: &mut OculanteState, palette: Palette, visible:
     }
     scroll.show_viewport(ui, |ui, viewport| {
         ui.set_min_width(width);
+        let now = Instant::now();
+        if (viewport.min.y - state.gallery.last_scroll_y).abs() > 0.5 {
+            state.gallery.last_scroll_y = viewport.min.y;
+            state.gallery.scrolling_until = now + Duration::from_millis(280);
+        }
+        let allow_full = now >= state.gallery.scrolling_until;
         let (content_rect, _) = ui.allocate_exact_size(vec2(width, total_h + 8.0), Sense::hover());
         let mut y = 0.0;
         for row in &rows {
@@ -2338,6 +2348,7 @@ fn photo_grid(ui: &mut Ui, state: &mut OculanteState, palette: Palette, visible:
                                 selected,
                                 favourite,
                                 label.as_ref(),
+                                allow_full,
                             );
                         }
                     }
@@ -2359,6 +2370,7 @@ fn photo_tile(
     selected: bool,
     favourite: bool,
     label: Option<&MlLabel>,
+    allow_full: bool,
 ) {
     let id = ui.id().with(("photo-tile", path));
     let response = ui.interact(rect, id, Sense::click());
@@ -2371,7 +2383,7 @@ fn photo_tile(
     ui.painter()
         .rect_filled(rect, CornerRadius::same(radius), Color32::from_gray(36));
 
-    match state.thumbnails.get_gallery(path) {
+    match state.thumbnails.get_gallery_for_display(path, allow_full) {
         Ok(thumb) => {
             let uri = format!("file://{}", thumb.display());
             egui::Image::new(uri.clone())
@@ -2380,6 +2392,15 @@ fn photo_tile(
                 .paint_at(ui, rect);
             let seq = state.gallery.photo_texture_seq;
             state.gallery.photo_textures.insert(uri, seq);
+            if thumb
+                .file_name()
+                .map(|n| n.to_string_lossy().contains("_preview"))
+                .unwrap_or(false)
+            {
+                // Nudge the next frame so that, once scrolling stops, we can
+                // replace the preview with a full thumbnail.
+                ui.ctx().request_repaint_after(Duration::from_millis(340));
+            }
             if state.ml.enabled && !state.ml.is_analyzed(path, modified_ms) {
                 state
                     .gallery
@@ -2885,7 +2906,7 @@ fn viewer_top_bar(ctx: &Context, app: &mut App, state: &mut OculanteState, palet
                             .as_ref()
                             .and_then(|p| p.file_name())
                             .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "Photos".into());
+                            .unwrap_or_else(|| crate::APP_NAME.into());
                         ui.add(
                             egui::Label::new(
                                 RichText::new(name)

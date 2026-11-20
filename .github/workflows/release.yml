@@ -62,13 +62,13 @@ jobs:
     - name: Cross-compile armv7
       run: |
         cross build --release --target armv7-unknown-linux-gnueabihf --no-default-features --features notan_glsl-to-spirv
-        zip -r oculante_armv7_minimal.zip target/armv7-unknown-linux-gnueabihf/release/oculante
+        zip -r pictor_armv7_minimal.zip target/armv7-unknown-linux-gnueabihf/release/pictor
       if: matrix.os == 'ubuntu-latest'
 
     # - name: Cross-compile arm64
     #   run: |
     #     cross build --release --target aarch64-unknown-linux-gnu --no-default-features --features notan/shaderc
-    #     zip -r oculante_aarch64_minimal.zip target/aarch64-unknown-linux-gnu/release/oculante
+    #     zip -r pictor_aarch64_minimal.zip target/aarch64-unknown-linux-gnu/release/pictor
     #   if: matrix.os == 'ubuntu-latest'
 
     - name: Install cargo bundle
@@ -112,11 +112,11 @@ jobs:
     - name: Build Linux classic Application
       run: |
         cargo build --release --no-default-features --features notan/shaderc
-        zip -r oculante_linux_minimal.zip target/release/oculante
+        zip -r pictor_linux_minimal.zip target/release/pictor
         cargo build --release
-        zip -r oculante_linux.zip target/release/oculante
+        zip -r pictor_linux.zip target/release/pictor
         cargo deb
-        cp target/debian/oculante_*.deb oculante.deb
+        cp target/debian/pictor_*.deb pictor.deb
       if: matrix.os == 'ubuntu-24.04'
 
 
@@ -129,7 +129,7 @@ jobs:
     - name: Sign and notarise Mac Silicon Bundle
       uses: ./.github/actions/macos-sign
       with:
-        app-path: target/release/bundle/osx/oculante.app
+        app-path: target/release/bundle/osx/Pictor.app
         certificate-p12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
         certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         team-id: ${{ secrets.MACOS_TEAM_ID }}
@@ -140,7 +140,7 @@ jobs:
 
     # ditto keeps the bundle metadata that zip drops, including the notarisation ticket
     - name: Zip Mac Silicon Bundle
-      run: mv target/release/bundle/osx/oculante.app . && ditto -c -k --keepParent oculante.app oculante_app.zip
+      run: mv target/release/bundle/osx/Pictor.app . && ditto -c -k --keepParent Pictor.app pictor_app.zip
       if: matrix.os == 'macos-latest'
 
     - name: Build Mac Intel Bundle
@@ -152,7 +152,7 @@ jobs:
     - name: Sign and notarise Mac Intel Bundle
       uses: ./.github/actions/macos-sign
       with:
-        app-path: target/release/bundle/osx/oculante.app
+        app-path: target/release/bundle/osx/Pictor.app
         certificate-p12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
         certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         team-id: ${{ secrets.MACOS_TEAM_ID }}
@@ -162,7 +162,7 @@ jobs:
       if: matrix.os == 'macos-15-intel'
 
     - name: Zip Mac Intel Bundle
-      run: mv target/release/bundle/osx/oculante.app . && ditto -c -k --keepParent oculante.app oculante_app_intel.zip
+      run: mv target/release/bundle/osx/Pictor.app . && ditto -c -k --keepParent Pictor.app pictor_app_intel.zip
       if: matrix.os == 'macos-15-intel'
 
     - name: Upload Linux 24.04 Release
@@ -173,8 +173,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: target/release/oculante
-        asset_name: oculante_linux
+        asset_path: target/release/pictor
+        asset_name: pictor_linux
         asset_content_type: application/zip
 
     - name: Upload ARMv7 Release
@@ -185,8 +185,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: oculante_armv7_minimal.zip
-        asset_name: oculante_linux_armv7_minimal.zip
+        asset_path: pictor_armv7_minimal.zip
+        asset_name: pictor_linux_armv7_minimal.zip
         asset_content_type: application/zip
 
     # - name: Upload ARM64 Release
@@ -197,8 +197,8 @@ jobs:
     #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     #   with:
     #     upload_url: ${{ needs.release_job.outputs.upload_url }}
-    #     asset_path: oculante_aarch64_minimal.zip
-    #     asset_name: oculante_linux_aarch64_minimal.zip
+    #     asset_path: pictor_aarch64_minimal.zip
+    #     asset_name: pictor_linux_aarch64_minimal.zip
     #     asset_content_type: application/zip
 
     - name: Upload Linux 24.04 Release zip
@@ -209,8 +209,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: oculante_linux.zip
-        asset_name: oculante_linux.zip
+        asset_path: pictor_linux.zip
+        asset_name: pictor_linux.zip
         asset_content_type: application/zip
 
     - name: Upload Linux 24.04 Release minimal zip
@@ -221,8 +221,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: oculante_linux_minimal.zip
-        asset_name: oculante_linux_minimal.zip
+        asset_path: pictor_linux_minimal.zip
+        asset_name: pictor_linux_minimal.zip
         asset_content_type: application/zip
 
     - name: Upload Linux 24.04 deb
@@ -233,8 +233,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: oculante.deb
-        asset_name: oculante-${{ github.ref_name }}.deb
+        asset_path: pictor.deb
+        asset_name: pictor-${{ github.ref_name }}.deb
         asset_content_type: application/zip
 
     - name: Upload Mac Release
@@ -245,8 +245,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: oculante_app.zip
-        asset_name: oculante_mac.zip
+        asset_path: pictor_app.zip
+        asset_name: pictor_mac.zip
         asset_content_type: application/zip
 
     - name: Upload Mac Release
@@ -257,8 +257,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: oculante_app_intel.zip
-        asset_name: oculante_mac_intel.zip
+        asset_path: pictor_app_intel.zip
+        asset_name: pictor_mac_intel.zip
         asset_content_type: application/zip
 
     - name: Upload Windows 2025 Release exe
@@ -269,8 +269,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release_job.outputs.upload_url }}
-        asset_path: target/release/oculante.exe
-        asset_name: oculante.exe
+        asset_path: target/release/pictor.exe
+        asset_name: pictor.exe
         asset_content_type: application/zip
 
   publish_release:
@@ -296,10 +296,10 @@ jobs:
   #     - name: Publish AUR package
   #       uses: KSXGitHub/github-actions-deploy-aur@v2.7.0
   #       with:
-  #         pkgname: oculante
+  #         pkgname: pictor
   #         pkgbuild: ./PKGBUILD
   #         commit_username: ${{ secrets.AUR_USERNAME }}
   #         commit_email: ${{ secrets.AUR_EMAIL }}
   #         ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-  #         commit_message: Update oculante AUR package
+  #         commit_message: Update pictor AUR package
   #         ssh_keyscan_types: rsa,dsa,ecdsa,ed25519

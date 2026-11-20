@@ -1,5 +1,7 @@
 /target
 /tools
+/dist
+installer/build-config.nsh
 **/*.rs.bk
 .history
 .DS_Store

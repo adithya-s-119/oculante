@@ -1,3 +1,8 @@
+/// User-facing application name.
+pub const APP_NAME: &str = "Pictor";
+/// Stable lowercase identifier used for data folders and window app IDs.
+pub const APP_ID: &str = "pictor";
+
 pub mod appstate;
 pub mod cache;
 pub mod comparelist;

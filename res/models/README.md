@@ -26,6 +26,6 @@ and objects) in `src/ml.rs`.
 
 Only a 224×224 centre crop is fed to the network. A 480×360 gallery thumbnail
 is reused, results are cached in
-`%LOCALAPPDATA%\photos\ml_cache.json` (or the platform equivalent) keyed by file
+`%LOCALAPPDATA%\pictor\ml_cache.json` (or the platform equivalent) keyed by file
 path and modification time, and inference happens on a single background
 thread. Browsing and zooming are never blocked by classification.

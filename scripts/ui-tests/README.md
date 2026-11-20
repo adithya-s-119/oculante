@@ -20,7 +20,7 @@ Rendering is done in software, no GPU or desktop session is needed.
 Run a single test by name, or test another binary:
 
     python3 scripts/ui-tests/run.py test_shortcuts
-    python3 scripts/ui-tests/run.py --binary path/to/oculante
+    python3 scripts/ui-tests/run.py --binary path/to/pictor
 
 Screenshots and the app log of each test end up in `target/ui-tests/<test>/`.
 

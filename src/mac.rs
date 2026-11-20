@@ -23,7 +23,7 @@ pub fn launch() -> Result<(), Box<dyn Error>> {
     info!("Mac: Now matching arguments {:?}", std::env::args());
     // Filter out strange mac args
     let args: Vec<String> = std::env::args().filter(|a| !a.contains("psn_")).collect();
-    let matches = clap::Command::new("Oculante")
+    let matches = clap::Command::new("Pictor")
         .arg(
             Arg::new("INPUT")
                 .help("Display this image")

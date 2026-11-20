@@ -1,7 +1,8 @@
 [package]
 authors = ["Johann Woelper <woelper@gmail.com>", "adithya-s-119"]
-description = "Photos - a frosted-glass photo gallery and viewer built on Oculante"
+description = "Pictor - a frosted-glass photo gallery and viewer built on Oculante"
 edition = "2021"
+autobins = false
 exclude = [
     ".github/*",
     "res/fonts/NotoSansSC-Regular.ttf",
@@ -24,8 +25,12 @@ version = "0.9.6"
 
 [package.metadata.bundle]
 icon = ["icon.ico"]
-identifier = "com.github.adithya-s-119.photos"
-name = "Photos"
+identifier = "com.github.adithya-s-119.pictor"
+name = "Pictor"
+
+[[bin]]
+name = "pictor"
+path = "src/main.rs"
 
 [dependencies]
 env_logger = "0.11"

@@ -170,14 +170,30 @@ pub struct MlService {
 
 impl Default for MlService {
     fn default() -> Self {
-        let cache_path = dirs::data_local_dir()
-            .unwrap_or_default()
-            .join("photos")
-            .join("ml_cache.json");
-        let cache = load_cache(&cache_path).unwrap_or_else(|e| {
-            debug!("No usable ML cache: {e}");
-            HashMap::new()
-        });
+        let data_dir = dirs::data_local_dir().unwrap_or_default();
+        let cache_dir = data_dir.join(crate::APP_ID);
+        let cache_path = cache_dir.join("ml_cache.json");
+        let legacy_cache_path = data_dir.join("photos").join("ml_cache.json");
+
+        if !cache_path.exists() && legacy_cache_path.exists() {
+            let _ = std::fs::create_dir_all(&cache_dir);
+            if let Err(e) = std::fs::rename(&legacy_cache_path, &cache_path) {
+                warn!("Could not migrate the old ML cache: {e}");
+            }
+        }
+
+        let cache = load_cache(&cache_path)
+            .or_else(|e| {
+                if legacy_cache_path.exists() {
+                    load_cache(&legacy_cache_path)
+                } else {
+                    Err(e)
+                }
+            })
+            .unwrap_or_else(|e| {
+                debug!("No usable ML cache: {e}");
+                HashMap::new()
+            });
         Self {
             tx: None,
             rx: None,

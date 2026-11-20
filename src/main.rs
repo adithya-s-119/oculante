@@ -59,16 +59,20 @@ fn main() -> Result<(), String> {
     }
     let _ = env_logger::try_init();
 
+    // Move an existing Oculante/Photos data folder to the Pictor folder before
+    // any settings are loaded. On Windows this also carries the thumbnail cache.
+    settings::migrate_legacy_data();
+
     let icon_data = include_bytes!("../icon.ico");
 
     let mut window_config = WindowConfig::new()
-        .set_title("Photos")
+        .set_title(APP_NAME)
         .set_size(1280, 820) // window's size
         .set_resizable(true) // window can be resized
         .set_window_icon_data(Some(icon_data))
         .set_taskbar_icon_data(Some(icon_data))
         .set_multisampling(0)
-        .set_app_id("photos");
+        .set_app_id(APP_ID);
 
     #[cfg(target_os = "windows")]
     {
@@ -150,7 +154,7 @@ fn main() -> Result<(), String> {
     window_config.always_on_top = false;
     window_config.max_size = None;
 
-    debug!("Starting oculante.");
+    debug!("Starting Pictor.");
     notan::init_with(init)
         .add_config(window_config)
         .add_config(EguiConfig)
@@ -166,7 +170,7 @@ fn init(_app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins) -> OculanteSt
     // Filter out strange mac args
     let args: Vec<String> = std::env::args().filter(|a| !a.contains("psn_")).collect();
 
-    let mut matches = Command::new("Photos")
+    let mut matches = Command::new(APP_NAME)
         .arg(
             Arg::new("INPUT")
                 .help("Display this image")
@@ -233,7 +237,7 @@ fn init(_app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins) -> OculanteSt
     open_paths(&mut state, paths_to_open);
 
     // Decide whether to land in the library or straight in the viewer. Opening
-    // with an image argument keeps Oculante's familiar one-click workflow;
+    // with an image argument keeps Pictor's familiar one-click workflow;
     // launching without one shows the Photos collection.
     if matches.contains_id("gallery") {
         state.gallery.view = PhotosView::Gallery;
@@ -269,7 +273,7 @@ fn init(_app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins) -> OculanteSt
                             .clone()
                             .send(utils::Frame::new_reset(i));
                     }
-                    Err(e) => error!("ERR loading from stdin: {e} - for now, oculante only supports data that can be decoded by the image crate."),
+                    Err(e) => error!("ERR loading from stdin: {e} - for now, Pictor only supports data that can be decoded by the image crate."),
                 }
             }
         }

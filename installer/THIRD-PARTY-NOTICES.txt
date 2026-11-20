@@ -1,0 +1,20 @@
+Pictor third-party notices
+==========================
+
+Pictor is built on Oculante (https://github.com/woelper/oculante), which is
+MIT-licensed. Pictor also bundles the following runtime libraries from the
+GCC toolchain so the executable runs on PCs without MinGW installed:
+
+  libstdc++-6.dll
+  libgcc_s_seh-1.dll
+  libwinpthread-1.dll
+
+These runtime libraries are distributed under the GNU General Public License
+version 3 with the GCC Runtime Library Exception. Source code and license
+texts are available from https://gcc.gnu.org/.
+
+The embedded SqueezeNet 1.1 model is from the ONNX Model Zoo and is licensed
+under Apache-2.0. Its license is included in the Pictor source tree at
+res/models/LICENSE-APACHE.
+
+Pictor itself is MIT-licensed. See LICENSE for the full text.

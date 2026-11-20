@@ -1,11 +1,11 @@
-# Photos
+# Pictor
 
-A frosted-glass photo library and viewer, built in Rust on top of
+Pictor is a frosted-glass photo library and viewer, built in Rust on top of
 [Oculante](https://github.com/woelper/oculante).
 
 **Fork:** <https://github.com/adithya-s-119/oculante>
 
-This fork replaces the single-image window with a Microsoft Photos Legacy–style
+Pictor replaces the single-image window with a Microsoft Photos Legacy–style
 experience while keeping Oculante's hardware-accelerated image pipeline:
 
 - **Collection library** — responsive photo grid grouped by month, a month/year
@@ -21,7 +21,7 @@ experience while keeping Oculante's hardware-accelerated image pipeline:
   unsure, a descriptive filename can break the tie; the UI marks those results
   as a “filename hint”. Large folders are lazy by default: visible photos are
   tagged as you browse, and a full pass is an explicit **Analyze all** action.
-- **Photos-style viewer** — filmstrip, favourite, slideshow (3/5/10 s),
+- **Photo viewer** — filmstrip, favourite, slideshow (3/5/10 s),
   fullscreen, zoom/pan, pixel picking, and the full Oculante edit/info panels.
 - **Built for big drives** — folder indexing runs on a worker thread so the
   window stays responsive, thumbnail lookups are memoised (no per-frame USB
@@ -41,12 +41,35 @@ cargo run --release -- --gallery
 ```
 
 `--gallery` opens the library directly. Passing a file or folder still opens it
-in the viewer, just like upstream Oculante. On Windows, a Rust toolchain (MSVC
-or GNU) and NASM (for the JPEG/AVIF codecs) are required; on Linux/macOS use the
-upstream build dependencies. See `res/models/README.md` for classifier
-provenance.
+in the viewer, just like upstream Oculante. The Windows build produces
+`target/release/pictor.exe`. Settings, the ML label cache and thumbnails live
+under `%LOCALAPPDATA%\pictor`; existing Oculante data is migrated on first
+launch. On Windows, a Rust toolchain (MSVC or GNU) and NASM (for the JPEG/AVIF
+codecs) are required; on Linux/macOS use the upstream build dependencies. See
+`res/models/README.md` for classifier provenance.
 
-### Photos shortcuts
+### Windows installer and portable ZIP
+
+With NSIS installed, build both distributables with:
+
+```powershell
+pwsh -File scripts/build_windows_package.ps1
+```
+
+This produces:
+
+- `dist/Pictor-Setup-<version>.exe` — a per-user installer (no administrator
+  rights required) with Start Menu shortcuts, an uninstaller and an Add/Remove
+  Programs entry. The optional section adds Pictor to the Windows **Open with**
+  menu without changing your default image viewer.
+- `dist/Pictor-<version>-portable.zip` — the executable, MinGW runtime DLLs,
+  README, license and third-party notices. Extract anywhere and run
+  `pictor.exe`.
+
+Pictor builds are unsigned, so Windows SmartScreen may show a warning on first
+launch.
+
+### Pictor shortcuts
 
 | Key | Action |
 | --- | --- |
@@ -276,12 +299,12 @@ UI Design:
 
 ## Privacy pledge
 
-Oculante does in no way collect or send anonymous or non-anonynmous user data or statistics. Oculante is and will remain free and open-source. There will never be ads.
-There are only two instances where oculante interacts with the network, and both never happen without being triggered by the user:
+Pictor does in no way collect or send anonymous or non-anonymous user data or statistics. Pictor is and will remain free and open-source. There will never be ads.
+There are only two instances where Pictor interacts with the network, and both never happen without being triggered by the user:
 - Updating the application (must be triggered manually from settings)
 - Listening for incoming images on a custom port (must be set on command line)
 
-In addition, Oculante saves some settings locally, for example:
+In addition, Pictor saves some settings locally, for example:
 - UI accent color
 - Keybindings
 - Vsync preferences
@@ -290,12 +313,8 @@ In addition, Oculante saves some settings locally, for example:
 
 ## Code signing policy
 
-The Windows downloads, `oculante.exe` and `oculante_setup.exe`, are signed. Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+Pictor builds from this fork are currently unsigned; Windows SmartScreen may show a warning on first launch. Upstream Oculante releases have their own signing policy.
 
-- Committers and reviewers: [woelper](https://github.com/woelper), [Stoppedpuma](https://github.com/Stoppedpuma), [0323pin](https://github.com/0323pin), [B-LechCode](https://github.com/B-LechCode)
-- Approvers: [woelper](https://github.com/woelper), [Stoppedpuma](https://github.com/Stoppedpuma)
-
-Only what the release workflow of this repository builds from its source gets signed, and every release is approved by hand before it is signed. Everyone with access to the repository or to SignPath uses multi-factor authentication.
 
 This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it, see the privacy pledge above.
 
