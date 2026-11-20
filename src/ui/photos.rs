@@ -2852,6 +2852,78 @@ fn viewer_ui(ctx: &Context, app: &mut App, state: &mut OculanteState) {
         return;
     }
 
+    let loading =
+        state.current_image.is_none() && state.current_path.is_some() && !state.is_loaded;
+    if loading {
+        // Keep the viewer from flashing a plain black window while a large
+        // image is decoded. A soft backdrop appears immediately, and a cached
+        // (or embedded-EXIF) thumbnail fills in as soon as it is ready.
+        ensure_backdrop(ctx, state);
+
+        let screen = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        painter.rect_filled(screen, 0.0, palette.base);
+        if let Some(texture) = &state.gallery.backdrop {
+            painter.image(
+                texture.id(),
+                screen,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::from_white_alpha(if palette.dark { 145 } else { 105 }),
+            );
+        }
+        painter.rect_filled(
+            screen,
+            0.0,
+            if palette.dark {
+                Color32::from_black_alpha(80)
+            } else {
+                Color32::from_white_alpha(40)
+            },
+        );
+
+        let preview = state.current_path.clone().and_then(|path| {
+            let jpeg = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+                .unwrap_or(false);
+            if jpeg {
+                // Do not ask for the full gallery thumbnail while loading; the
+                // cheap EXIF preview is enough and avoids competing with the
+                // full-size decode.
+                state
+                    .thumbnails
+                    .get_gallery_for_display(&path, false)
+                    .ok()
+            } else {
+                let mut thumb = state.thumbnails.existing_gallery(&path);
+                if thumb.is_none() {
+                    thumb = state.thumbnails.existing_analysis(&path);
+                }
+                thumb
+            }
+        });
+        if let Some(thumb) = preview {
+            let uri = format!("file://{}", thumb.display());
+            let mut max = screen.size() - vec2(80.0, 180.0);
+            max.x = max.x.max(160.0);
+            max.y = max.y.max(120.0);
+            egui::Area::new(Id::new("photos-loading-preview"))
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                .order(Order::Middle)
+                .show(ctx, |ui| {
+                    ui.add(
+                        egui::Image::new(uri)
+                            .max_size(max)
+                            .corner_radius(CornerRadius::same(12))
+                            .show_loading_spinner(false),
+                    );
+                });
+        }
+
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
     if !state.persistent_settings.zen_mode {
         viewer_top_bar(ctx, app, state, palette);
         viewer_filmstrip(ctx, state, palette);

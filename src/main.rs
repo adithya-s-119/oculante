@@ -63,6 +63,12 @@ fn main() -> Result<(), String> {
     // any settings are loaded. On Windows this also carries the thumbnail cache.
     settings::migrate_legacy_data();
 
+    // Opening a file/folder from Explorer should fill the screen instead of
+    // inheriting Explorer's offset or a stale window position.
+    let launched_with_path = std::env::args()
+        .skip(1)
+        .any(|arg| !arg.starts_with('-') && std::path::Path::new(&arg).exists());
+
     let icon_data = include_bytes!("../icon.ico");
 
     let mut window_config = WindowConfig::new()
@@ -73,6 +79,10 @@ fn main() -> Result<(), String> {
         .set_taskbar_icon_data(Some(icon_data))
         .set_multisampling(0)
         .set_app_id(APP_ID);
+
+    if launched_with_path {
+        window_config = window_config.set_maximized(true);
+    }
 
     #[cfg(target_os = "windows")]
     {

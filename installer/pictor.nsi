@@ -48,10 +48,12 @@ VIAddVersionKey /LANG=1033 "CompanyName" "adithya-s-119"
 
 !macro RegisterAssoc EXT
     WriteRegStr HKCU "Software\Classes\${EXT}\OpenWithProgids" "Pictor.Image" ""
+    WriteRegStr HKCU "Software\Pictor\Capabilities\FileAssociations" "${EXT}" "Pictor.Image"
 !macroend
 
 !macro UnregisterAssoc EXT
     DeleteRegValue HKCU "Software\Classes\${EXT}\OpenWithProgids" "Pictor.Image"
+    DeleteRegValue HKCU "Software\Pictor\Capabilities\FileAssociations" "${EXT}"
 !macroend
 
 Section "Pictor Photo Library" SEC_MAIN
@@ -89,11 +91,23 @@ Section /o "Desktop shortcut" SEC_DESKTOP
     CreateShortcut "$DESKTOP\Pictor.lnk" "$INSTDIR\pictor.exe"
 SectionEnd
 
-Section /o "Add Pictor to the Open with menu" SEC_ASSOC
+Section "Explorer integration (Open with + context menu)" SEC_ASSOC
     WriteRegStr HKCU "Software\Classes\Pictor.Image" "" "Pictor image"
     WriteRegStr HKCU "Software\Classes\Pictor.Image\DefaultIcon" "" "$INSTDIR\pictor.exe,0"
     WriteRegStr HKCU "Software\Classes\Pictor.Image\shell\open\command" "" '"$INSTDIR\pictor.exe" "%1"'
     WriteRegStr HKCU "Software\Classes\Applications\pictor.exe\shell\open\command" "" '"$INSTDIR\pictor.exe" "%1"'
+
+    ; Small Explorer context-menu entry for image files. On Windows 11 this
+    ; lives under "Show more options"; it does not change the default viewer.
+    WriteRegStr HKCU "Software\Classes\SystemFileAssociations\image\shell\Pictor" "" "Open with Pictor"
+    WriteRegStr HKCU "Software\Classes\SystemFileAssociations\image\shell\Pictor" "Icon" "$INSTDIR\pictor.exe,0"
+    WriteRegStr HKCU "Software\Classes\SystemFileAssociations\image\shell\Pictor\command" "" '"$INSTDIR\pictor.exe" "%1"'
+
+    ; Make Pictor visible in Windows Settings > Apps > Default apps.
+    WriteRegStr HKCU "Software\Pictor\Capabilities" "ApplicationName" "Pictor"
+    WriteRegStr HKCU "Software\Pictor\Capabilities" "ApplicationDescription" "Fast, frosted-glass photo library and viewer"
+    WriteRegStr HKCU "Software\Pictor\Capabilities" "ApplicationIcon" "$INSTDIR\pictor.exe,0"
+    WriteRegStr HKCU "Software\RegisteredApplications" "Pictor" "Software\Pictor\Capabilities"
 
     !insertmacro RegisterAssoc ".bmp"
     !insertmacro RegisterAssoc ".gif"
@@ -140,6 +154,7 @@ Section "Uninstall"
 
     DeleteRegKey HKCU "Software\Classes\Pictor.Image"
     DeleteRegKey HKCU "Software\Classes\Applications\pictor.exe"
+    DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\image\shell\Pictor"
     !insertmacro UnregisterAssoc ".bmp"
     !insertmacro UnregisterAssoc ".gif"
     !insertmacro UnregisterAssoc ".heic"
@@ -154,6 +169,7 @@ Section "Uninstall"
 
     System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
 
+    DeleteRegValue HKCU "Software\RegisteredApplications" "Pictor"
     DeleteRegKey HKCU "${UNINST_KEY}"
     DeleteRegKey HKCU "Software\Pictor"
 SectionEnd
@@ -161,5 +177,5 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
     !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "The Pictor application and the runtime libraries it needs."
     !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "Create a Pictor shortcut on the desktop."
-    !insertmacro MUI_DESCRIPTION_TEXT ${SEC_ASSOC} "Add Pictor to the Windows Open with menu for common image formats. This does not change your default viewer."
+    !insertmacro MUI_DESCRIPTION_TEXT ${SEC_ASSOC} "Add a right-click Open with Pictor entry, a small Explorer context-menu item, and register Pictor in Windows Default Apps. This does not change your default viewer."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END

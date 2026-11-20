@@ -69,6 +69,24 @@ This produces:
 Pictor builds are unsigned, so Windows SmartScreen may show a warning on first
 launch.
 
+### Open images from Explorer
+
+The installer's **Explorer integration (Open with + context menu)** option is
+selected by default. It adds a small **Open with Pictor** entry to the
+right-click menu for image files, registers Pictor for Windows **Open with**,
+and adds it to Windows Default Apps. It does not change your current default
+viewer. Opening an image or folder from Explorer starts Pictor maximized, and
+the window/taskbar icon is the Pictor icon. To make double-clicking an image
+open Pictor, choose it once:
+
+- Right-click an image → **Open with** → **Choose another app** → **Pictor** →
+  **Always use this app**, or
+- open **Settings → Apps → Default apps → Pictor**.
+
+Pictor's own Settings window has a **Default image viewer** button that opens
+that Windows page. Windows 10/11 requires this final choice from you; installers
+cannot silently change default file associations.
+
 ### Pictor shortcuts
 
 | Key | Action |

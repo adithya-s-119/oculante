@@ -225,6 +225,13 @@ pub fn settings_ui(app: &mut App, ctx: &Context, state: &mut OculanteState, _gfx
                                         }
                                     }, ui);
 
+                                    #[cfg(target_os = "windows")]
+                                    configuration_item_ui("Default image viewer", "Open Windows Default Apps to choose Pictor for photos. Windows asks you to confirm the change.", |ui| {
+                                        if ui.button("Open settings").clicked() {
+                                            _ = webbrowser::open("ms-settings:defaultapps");
+                                        }
+                                    }, ui);
+
                                     configuration_item_ui("Visit GitHub Repository", "Check out the source code, request a feature, submit a bug, or leave a star if you like it!", |ui| {
                                         let repository = env!("CARGO_PKG_REPOSITORY");
                                         if ui.link("Check it out!").on_hover_text(repository).clicked() {

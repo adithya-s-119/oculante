@@ -83,21 +83,9 @@ fn main() {
     let in_repository = Path::new(".git").exists();
 
     if in_repository {
-        // #[cfg(windows)]
-        match std::process::Command::new("convert")
-            .args(vec![
-                "res/icons/icon.png",
-                "-compress",
-                "none",
-                "-define",
-                "icon:auto-resize=16,32,48,64,128,256",
-                "icon.ico",
-            ])
-            .spawn()
-        {
-            Ok(_b) => println!("Converted icon"),
-            Err(e) => eprintln!("Error converting icon {:?}. Is imagemagick installed?", e),
-        }
+        // icon.ico is committed. Regenerate it from res/icons/icon.png with
+        // scripts/make_icon.py if the artwork changes; the old `convert` call
+        // accidentally invoked Windows' FAT converter on this platform.
 
         // insert version into plist
         let mut plist: String = "".into();
@@ -130,6 +118,9 @@ fn main() {
             .unwrap();
     }
 
+    println!("cargo:rerun-if-changed=icon.ico");
+    println!("cargo:rerun-if-changed=winres.rc");
+
     if cfg!(target_os = "windows") {
         let mut res = winres::WindowsResource::new();
         res.set_icon("icon.ico");
@@ -137,7 +128,16 @@ fn main() {
         res.set("FileDescription", "Pictor Photo Library");
         res.set("InternalName", "pictor");
         res.set("OriginalFilename", "pictor.exe");
-        _ = res.compile();
+        match res.compile() {
+            Ok(()) => {
+                // GNU ld drops the resource archive unless something references
+                // it. Link the object directly so Explorer and the taskbar get
+                // the exe icon.
+                let out_dir = env::var("OUT_DIR").unwrap();
+                println!("cargo:rustc-link-arg={out_dir}/resource.o");
+            }
+            Err(e) => eprintln!("Could not compile Windows resources: {e}"),
+        }
     }
 
     let shortcut_file = "shortcuts.txt";
