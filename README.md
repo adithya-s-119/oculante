@@ -1,12 +1,56 @@
-### Oculante is currently in maintenance mode. We will only be accepting bug fixes and minor improvements to existing features until we complete our rewrite. More details can be seen [here](https://github.com/woelper/oculante/issues/#746). Progress can be seen on the oculante-next branch.
+# Photos
 
-<h1 align="center">
-    <img alt="banner" src="res/banner.avif">
-</h1>
+A frosted-glass photo library and viewer, built in Rust on top of
+[Oculante](https://github.com/woelper/oculante).
 
- _A no-nonsense hardware-accelerated image viewer_
+This fork replaces the single-image window with a Microsoft Photos Legacy–style
+experience while keeping Oculante's hardware-accelerated image pipeline:
 
-[<img src="res/download.svg" height="50">](https://github.com/woelper/oculante/releases/latest)
+- **Collection library** — responsive photo grid grouped by date, search,
+  favourites, recent photos, folder navigation and quick folder picker.
+- **Frosted glass everywhere** — translucent rounded cards, soft shadows,
+  accent glows and a blurred-photo backdrop that updates with the photo you are
+  looking at. No web view, no Electron, no composition tax.
+- **Offline AI categories** — an embedded 4.7 MB SqueezeNet 1.1 model runs in
+  the background via pure-Rust tract. Filter your library by **trees, cats,
+  dogs, birds, insects, animals, food, vehicles, places and objects** without an
+  internet connection. Results are cached per file + mtime. When the model is
+  unsure, a descriptive filename can break the tie; the UI marks those results
+  as a “filename hint”.
+- **Photos-style viewer** — filmstrip, favourite, slideshow (3/5/10 s),
+  fullscreen, zoom/pan, pixel picking, and the full Oculante edit/info panels.
+- **Native speed** — Rust, notan, egui and wgpu/OpenGL. Lazy redraw, on-demand
+  thumbnails and background decode/inference keep the UI at frame rate.
+
+Oculante is currently in maintenance mode upstream. This fork is a
+maintainer-friendly playground for the Photos-style experience; bug fixes and
+features that apply to both projects are welcome upstream.
+
+### Build
+
+```sh
+cargo run --release -- --gallery
+```
+
+`--gallery` opens the library directly. Passing a file or folder still opens it
+in the viewer, just like upstream Oculante. On Windows, an MSVC toolchain and
+NASM (for the JPEG/AVIF codecs) are required; on Linux/macOS use the upstream
+build dependencies. See `res/models/README.md` for classifier provenance.
+
+### Photos shortcuts
+
+| Key | Action |
+| --- | --- |
+| `/` or `Ctrl+F` | Focus search |
+| `Arrow keys` | Move the selection in the grid |
+| `Enter` or double-click | Open the selected photo |
+| `Esc` | Back to the collection / stop slideshow |
+| `Space` | Start a slideshow |
+
+The rest of Oculante's shortcuts (zoom, pan, edit, compare, next/prev image)
+continue to work in the viewer.
+
+## Upstream Oculante
 
 Oculante's vision is to be a fast, unobtrusive, portable image viewer with a wide range of supported image formats while also offering image analysis and basic editing tools.
 

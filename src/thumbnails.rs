@@ -1,6 +1,8 @@
 pub const THUMB_SIZE: [u32; 2] = [120, 90];
+/// Larger cache used by the Photos-style gallery grid.
+pub const GALLERY_THUMB_SIZE: [u32; 2] = [480, 360];
 pub const THUMB_CAPTION_HEIGHT: u32 = 24;
-pub const MAX_THREADS: usize = 4;
+pub const MAX_THREADS: usize = 6;
 
 use std::{
     collections::HashSet,
@@ -8,7 +10,6 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -27,13 +28,28 @@ pub struct Thumbnails {
 
 impl Thumbnails {
     pub fn get<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
+        self.get_sized(path, THUMB_SIZE, "")
+    }
+
+    /// Request the large gallery thumbnail. It is generated on a background
+    /// thread and returned on a later frame.
+    pub fn get_gallery<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
+        self.get_sized(path, GALLERY_THUMB_SIZE, "_gallery")
+    }
+
+    fn get_sized<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        size: [u32; 2],
+        suffix: &str,
+    ) -> Result<PathBuf> {
         trace!("Thumbnail requested for {}", path.as_ref().display());
 
         if !get_disk_cache_path()?.exists() {
             warn!("Thumbnail cache dir missing, creating it");
             create_dir_all(&get_disk_cache_path()?)?;
         }
-        let cached_path = get_cached_path(&path);
+        let cached_path = get_cached_path_suffix(&path, suffix);
 
         // The thumbnail is missing and needs to be generated
         if !cached_path.exists() {
@@ -41,28 +57,35 @@ impl Thumbnails {
                 bail!("Thumbnail is still processing or failed in the past.");
             }
             debug!("\tThumbnail missing");
+            // Reserve a worker slot *before* spawning, so a grid with hundreds
+            // of visible placeholders cannot create hundreds of waiting
+            // threads. Callers simply retry on a later frame.
+            {
+                let mut jobs = self.pool.lock().unwrap();
+                if *jobs >= MAX_THREADS {
+                    bail!("Thumbnail pool is busy.");
+                }
+                *jobs += 1;
+            }
             let fp = path.as_ref().to_path_buf();
             let pool = self.pool.clone();
+            let suffix = suffix.to_string();
             std::thread::spawn(move || {
-                loop {
-                    let num = *pool.lock().unwrap();
-                    if num > MAX_THREADS {
-                        std::thread::sleep(Duration::from_millis(100));
-                    } else {
-                        break;
-                    }
-                }
-                *pool.lock().unwrap() += 1;
-                if let Err(e) = generate(&fp) {
+                if let Err(e) = generate_sized(&fp, size, &suffix) {
                     error!("Error generating thumbnail: {e}");
                 }
-                let num = *pool.lock().unwrap();
-                *pool.lock().unwrap() = num.saturating_sub(1);
+                let mut jobs = pool.lock().unwrap();
+                *jobs = jobs.saturating_sub(1);
             });
             self.ids.insert(cached_path);
             bail!("Thumbnail not yet present.");
         }
         Ok(cached_path)
+    }
+
+    /// How many thumbnail jobs are currently running or queued.
+    pub fn active_jobs(&self) -> usize {
+        *self.pool.lock().unwrap()
     }
 }
 
@@ -83,13 +106,30 @@ pub fn get_disk_cache_path() -> Result<PathBuf> {
 }
 
 pub fn get_cached_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    get_cached_path_suffix(path, "")
+}
+
+pub fn get_cached_path_suffix<P: AsRef<Path>>(path: P, suffix: &str) -> PathBuf {
+    let id = path_to_id(path);
+    let stem = id
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // The large gallery cache uses JPEG (far smaller, and it is only ever a
+    // screen-resolution preview). The classic 120x90 cache stays PNG.
+    let extension = if suffix.is_empty() { "png" } else { "jpg" };
     get_disk_cache_path()
         .unwrap_or_default()
-        .join(path_to_id(path))
+        .join(format!("{stem}{suffix}"))
+        .with_extension(extension)
 }
 
 pub fn generate<P: AsRef<Path>>(source_path: P) -> Result<()> {
-    let dest_path = get_cached_path(&source_path);
+    generate_sized(source_path, THUMB_SIZE, "")
+}
+
+pub fn generate_sized<P: AsRef<Path>>(source_path: P, size: [u32; 2], suffix: &str) -> Result<()> {
+    let dest_path = get_cached_path_suffix(&source_path, suffix);
     debug!(
         "\tGen thumbnail for {} to {}",
         source_path.as_ref().display(),
@@ -100,15 +140,24 @@ pub fn generate<P: AsRef<Path>>(source_path: P) -> Result<()> {
 
     debug!("\tOpened {}", source_path.as_ref().display());
 
-    from_existing(dest_path, &i)?;
+    from_existing_sized(dest_path, &i, size)?;
     Ok(())
 }
 
 pub fn from_existing<P: AsRef<Path>>(dest_path: P, image: &DynamicImage) -> Result<()> {
+    from_existing_sized(dest_path, image, THUMB_SIZE)
+}
+
+pub fn from_existing_sized<P: AsRef<Path>>(
+    dest_path: P,
+    image: &DynamicImage,
+    target: [u32; 2],
+) -> Result<()> {
+    let dest_path = dest_path.as_ref().to_path_buf();
     debug!("TMB=> Original image size: {:?}", image.dimensions());
 
-    let target_width = 120;
-    let target_height = 90;
+    let target_width = target[0];
+    let target_height = target[1];
     let desired_aspect = target_width as f32 / target_height as f32;
 
     let (orig_width, orig_height) = image.dimensions();
@@ -137,7 +186,26 @@ pub fn from_existing<P: AsRef<Path>>(dest_path: P, image: &DynamicImage) -> Resu
         filter: crate::image_editing::ScaleFilter::Bilinear,
     };
     op.process_image(&mut d)?;
-    d.save(&dest_path)?;
+
+    // Write atomically: readers (egui's image loader and the classifier) must
+    // never see a half-written thumbnail.
+    let ext = dest_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "png".into());
+    let stem = dest_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "thumb".into());
+    let tmp = dest_path.with_file_name(format!(".{stem}.tmp.{ext}"));
+    d.save(&tmp)?;
+    if dest_path.exists() {
+        let _ = std::fs::remove_file(&dest_path);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dest_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
 
     Ok(())
 }

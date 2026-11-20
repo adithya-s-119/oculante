@@ -2,10 +2,12 @@ use crate::{
     comparelist::CompareList,
     filebrowser::BrowserDir,
     image_editing::EditState,
+    ml::MlService,
     scrubber::Scrubber,
     settings::{PersistentSettings, VolatileSettings},
     texture_wrapper::TextureWrapperManager,
     thumbnails::Thumbnails,
+    ui::photos::GalleryState,
     utils::{ExtendedImageInfo, Frame, Player},
 };
 
@@ -102,6 +104,10 @@ pub struct OculanteState {
     pub filebrowser_last_dir: BrowserDir,
     pub thumbnails: Thumbnails,
     pub new_image_loaded: bool,
+    /// Photos-style gallery and viewer chrome.
+    pub gallery: GalleryState,
+    /// Offline image categorisation service.
+    pub ml: MlService,
 }
 
 impl OculanteState {
@@ -193,6 +199,8 @@ impl Default for OculanteState {
             filebrowser_last_dir: Default::default(),
             thumbnails: Default::default(),
             new_image_loaded: false,
+            gallery: Default::default(),
+            ml: Default::default(),
         }
     }
 }

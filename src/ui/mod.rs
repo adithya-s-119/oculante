@@ -19,6 +19,8 @@ mod theme;
 pub use theme::*;
 mod thumbnail_rendering;
 pub use thumbnail_rendering::*;
+pub mod photos;
+pub use photos::{photos_ui, tick_slideshow};
 
 use crate::egui_modal;
 #[cfg(feature = "file_open")]
@@ -50,7 +52,7 @@ use crate::{
         MeasureShape, ScaleFilter,
     },
     paint::PaintStroke,
-    settings::{set_system_theme, ColorTheme, PersistentSettings, VolatileSettings},
+    settings::{ColorTheme, PersistentSettings, VolatileSettings},
     shortcuts::{key_name, key_pressed, keypresses_as_string, lookup},
     thumbnails::{self, Thumbnails, THUMB_CAPTION_HEIGHT, THUMB_SIZE},
 };

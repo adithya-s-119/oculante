@@ -1,6 +1,6 @@
 [package]
-authors = ["Johann Woelper <woelper@gmail.com>"]
-description = "A minimalistic image viewer with analysis and editing tools"
+authors = ["Johann Woelper <woelper@gmail.com>", "adithya-s-119"]
+description = "Photos - a frosted-glass photo gallery and viewer built on Oculante"
 edition = "2021"
 exclude = [
     ".github/*",
@@ -19,13 +19,13 @@ keywords = ["graphics", "image", "viewer"]
 license = "MIT"
 name = "oculante"
 readme = "README.md"
-repository = "https://github.com/woelper/oculante/"
+repository = "https://github.com/adithya-s-119/oculante/"
 version = "0.9.6"
 
 [package.metadata.bundle]
 icon = ["icon.ico"]
-identifier = "com.github.woelper.oculante"
-name = "oculante"
+identifier = "com.github.adithya-s-119.photos"
+name = "Photos"
 
 [dependencies]
 env_logger = "0.11"
@@ -106,6 +106,9 @@ thiserror = "2.0"
 
 img-parts = "0.4" # for exif saving
 dark-light = "3.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Tiny pure-Rust ONNX runtime for the optional offline photo classifier.
+tract-onnx = { version = "0.23", default-features = false }
 trash = "5.2"
 flate2 = "1.0" # for KTX
 bitflags = "2.8" # for KTX

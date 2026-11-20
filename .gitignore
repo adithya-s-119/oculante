@@ -1,4 +1,5 @@
 /target
+/tools
 **/*.rs.bk
 .history
 .DS_Store

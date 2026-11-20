@@ -911,12 +911,20 @@ pub fn prev_image(state: &mut OculanteState) {
 
 /// Set the window title
 pub fn set_title(app: &mut App, state: &mut OculanteState) {
+    if state.gallery.view == crate::ui::photos::PhotosView::Gallery {
+        let already_photos = app.backend.window().title() == "Photos";
+        if !already_photos {
+            app.backend.window().set_title("Photos");
+        }
+        return;
+    }
+
     let p = state.current_path.clone().unwrap_or_default();
 
     let mut title_string = state
         .persistent_settings
         .title_format
-        .replacen("{APP}", env!("CARGO_PKG_NAME"), 10)
+        .replacen("{APP}", "Photos", 10)
         .replacen("{VERSION}", env!("CARGO_PKG_VERSION"), 10)
         .replacen("{FULLPATH}", &format!("{}", p.display()), 10)
         .replacen(

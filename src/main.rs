@@ -36,6 +36,7 @@ use oculante::appstate::*;
 use oculante::utils::*;
 use oculante::*;
 use shortcuts::key_pressed;
+use ui::photos::{self, PhotosView};
 use ui::PANEL_WIDTH;
 use ui::*;
 
@@ -61,13 +62,13 @@ fn main() -> Result<(), String> {
     let icon_data = include_bytes!("../icon.ico");
 
     let mut window_config = WindowConfig::new()
-        .set_title(&format!("Oculante | {}", env!("CARGO_PKG_VERSION")))
-        .set_size(1026, 600) // window's size
+        .set_title("Photos")
+        .set_size(1280, 820) // window's size
         .set_resizable(true) // window can be resized
         .set_window_icon_data(Some(icon_data))
         .set_taskbar_icon_data(Some(icon_data))
         .set_multisampling(0)
-        .set_app_id("oculante");
+        .set_app_id("photos");
 
     #[cfg(target_os = "windows")]
     {
@@ -143,7 +144,10 @@ fn main() -> Result<(), String> {
             error!("Could not load persistent settings: {e}");
         }
     }
-    window_config.always_on_top = true;
+    // Start as a normal window. Creating a topmost window and immediately
+    // dropping the level can confuse the Windows window manager when another
+    // app is fullscreen, so we keep the level normal from the start.
+    window_config.always_on_top = false;
     window_config.max_size = None;
 
     debug!("Starting oculante.");
@@ -162,7 +166,7 @@ fn init(_app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins) -> OculanteSt
     // Filter out strange mac args
     let args: Vec<String> = std::env::args().filter(|a| !a.contains("psn_")).collect();
 
-    let mut matches = Command::new("Oculante")
+    let mut matches = Command::new("Photos")
         .arg(
             Arg::new("INPUT")
                 .help("Display this image")
@@ -188,6 +192,14 @@ fn init(_app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins) -> OculanteSt
                 .takes_value(false)
                 .short('c')
                 .help("Chainload on Mac"),
+        )
+        .arg(
+            Arg::new("gallery")
+                .required(false)
+                .takes_value(false)
+                .long("gallery")
+                .short('g')
+                .help("Start in the photo library instead of the viewer"),
         )
         .get_matches_from(args);
 
@@ -219,6 +231,26 @@ fn init(_app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins) -> OculanteSt
     state.piped_paths = piped_paths(&matches, paths_to_open.clone());
 
     open_paths(&mut state, paths_to_open);
+
+    // Decide whether to land in the library or straight in the viewer. Opening
+    // with an image argument keeps Oculante's familiar one-click workflow;
+    // launching without one shows the Photos collection.
+    if matches.contains_id("gallery") {
+        state.gallery.view = PhotosView::Gallery;
+        state.gallery.needs_refresh = true;
+    } else if let Some(path) = &state.current_path {
+        state.gallery.view = PhotosView::Viewer;
+        if let Some(parent) = path.parent() {
+            state.gallery.folder = parent.to_path_buf();
+        }
+    } else {
+        state.gallery.view = PhotosView::Gallery;
+        let last = state.volatile_settings.last_open_directory.clone();
+        if last.is_dir() {
+            state.gallery.folder = last;
+        }
+        state.gallery.needs_refresh = true;
+    }
 
     if matches.contains_id("stdin") {
         debug!("Trying to read from pipe");
@@ -346,6 +378,13 @@ fn init(_app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins) -> OculanteSt
 
 fn process_events(app: &mut App, state: &mut OculanteState, evt: Event) {
     if state.key_grab {
+        return;
+    }
+    // The library owns its keyboard model (search, selection, Enter). Do not
+    // let image-viewer hotkeys fire while it is on screen.
+    if state.gallery.view == PhotosView::Gallery
+        && matches!(&evt, Event::KeyDown { .. } | Event::KeyUp { .. })
+    {
         return;
     }
     match evt {
@@ -545,14 +584,21 @@ fn process_events(app: &mut App, state: &mut OculanteState, evt: Event) {
             }
         }
         Event::WindowResize { width, height } => {
-            //TODO: remove this if save on exit works
-            state.volatile_settings.window_geometry.1 = (width, height);
-            state.volatile_settings.window_geometry.0 = (
-                app.backend.window().position().0 as u32,
-                app.backend.window().position().1 as u32,
-            );
-            // By resetting the image, we make it fill the window on resize
-            if state.persistent_settings.fit_image_on_window_resize {
+            // Remember the normal window geometry, never the temporary
+            // fullscreen/slideshow geometry.
+            if !app.window().is_fullscreen() {
+                state.volatile_settings.window_geometry.1 = (width, height);
+                state.volatile_settings.window_geometry.0 = (
+                    app.backend.window().position().0 as u32,
+                    app.backend.window().position().1 as u32,
+                );
+            }
+            // Photos-style viewer always re-fits when the window changes size
+            // (including fullscreen/slideshow transitions).
+            if state.gallery.view == PhotosView::Viewer
+                || state.persistent_settings.fit_image_on_window_resize
+                || state.gallery.slideshow
+            {
                 state.reset_image = true;
             }
         }
@@ -562,16 +608,19 @@ fn process_events(app: &mut App, state: &mut OculanteState, evt: Event) {
     match evt {
         Event::Exit => {
             info!("About to exit");
-            // save position
-            state.volatile_settings.window_geometry = (
-                (
-                    app.window().position().0 as u32,
-                    app.window().position().1 as u32,
-                ),
-                app.window().size(),
-            );
+            // Save position (but not the temporary fullscreen size).
+            if !app.window().is_fullscreen() {
+                state.volatile_settings.window_geometry = (
+                    (
+                        app.window().position().0 as u32,
+                        app.window().position().1 as u32,
+                    ),
+                    app.window().size(),
+                );
+            }
             _ = state.persistent_settings.save_blocking();
             _ = state.volatile_settings.save_blocking();
+            state.ml.save();
         }
         Event::MouseWheel { delta_x, delta_y } => {
             trace!("Mouse wheel event");
@@ -626,7 +675,13 @@ fn process_events(app: &mut App, state: &mut OculanteState, evt: Event) {
                         state.is_loaded = false;
                         state.current_image = None;
                         state.player.load(&p);
+                        if let Some(parent) = p.parent() {
+                            state.gallery.folder = parent.to_path_buf();
+                        }
                         state.current_path = Some(p);
+                        state.gallery.view = PhotosView::Viewer;
+                        state.gallery.filmstrip_index = None;
+                        state.gallery.backdrop_dirty = true;
                     } else {
                         state.send_message_warn("Unsupported file!");
                     }
@@ -655,12 +710,17 @@ fn process_events(app: &mut App, state: &mut OculanteState, evt: Event) {
 }
 
 fn update(app: &mut App, state: &mut OculanteState) {
+    if state.ml.poll() {
+        state.redraw = true;
+    }
+    photos::tick_slideshow(state);
+
     if state.new_image_loaded {
         state.new_image_loaded = false;
     }
 
     if state.first_start {
-        app.window().set_always_on_top(false);
+        app.window().set_always_on_top(state.always_on_top);
     }
 
     if let Some(p) = &state.current_path {
@@ -674,13 +734,15 @@ fn update(app: &mut App, state: &mut OculanteState) {
     // Save every 5 secs
     let t = app.timer.elapsed_f32() % 5.0;
     if t <= 0.01 {
-        state.volatile_settings.window_geometry = (
-            (
-                app.window().position().0 as u32,
-                app.window().position().1 as u32,
-            ),
-            app.window().size(),
-        );
+        if !app.window().is_fullscreen() {
+            state.volatile_settings.window_geometry = (
+                (
+                    app.window().position().0 as u32,
+                    app.window().position().1 as u32,
+                ),
+                app.window().size(),
+            );
+        }
         _ = state.persistent_settings.save_blocking();
         _ = state.volatile_settings.save_blocking();
         trace!("Save {t}");
@@ -787,9 +849,13 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
         state.player.load(&p);
         if let Some(dir) = p.parent() {
             state.volatile_settings.last_open_directory = dir.to_path_buf();
+            state.gallery.folder = dir.to_path_buf();
         }
         state.current_path = Some(p);
         state.scrubber.fixed_paths = false;
+        state.gallery.view = PhotosView::Viewer;
+        state.gallery.filmstrip_index = None;
+        state.gallery.backdrop_dirty = true;
     }
 
     // check if a new loaded image has been sent
@@ -986,6 +1052,7 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
                 }
                 state.current_image = Some(img);
                 state.new_image_loaded = true;
+                state.gallery.backdrop_dirty = true;
             }
             Frame::UpdateTexture => {
                 // Only update the texture.
@@ -1056,7 +1123,8 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
             ctx.memory_mut(|w| w.open_popup(Id::new(&id)));
         }
 
-        if !state.pointer_over_ui
+        if state.gallery.view == PhotosView::Viewer
+            && !state.pointer_over_ui
             && !state.mouse_grab
             && ctx.input(|r| {
                 r.pointer
@@ -1090,16 +1158,9 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
             }
         }
 
-        // the top menu bar
-        if !state.persistent_settings.zen_mode {
-            let menu_height = 36.0;
-            egui::TopBottomPanel::top("menu")
-                .exact_height(menu_height)
-                .show_separator_line(false)
-                .show(ctx, |ui| {
-                    main_menu(ui, state, app, gfx);
-                });
-        }
+        // Photos-style library or viewer chrome.
+        photos_ui(ctx, app, state);
+
         if state.persistent_settings.zen_mode && state.persistent_settings.borderless {
             egui::TopBottomPanel::top("menu_zen")
                 .min_height(40.)
@@ -1115,16 +1176,9 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
                 });
         }
 
-        if state.persistent_settings.show_scrub_bar {
-            egui::TopBottomPanel::bottom("scrubber")
-                .max_height(22.)
-                .min_height(22.)
-                .show(ctx, |ui| {
-                    scrubber_ui(state, ui);
-                });
-        }
-
-        if state.persistent_settings.edit_enabled
+        if state.gallery.view == PhotosView::Viewer
+            && !state.gallery.slideshow
+            && state.persistent_settings.edit_enabled
             && !state.settings_enabled
             && !state.persistent_settings.zen_mode
             && state.current_image.is_some()
@@ -1132,7 +1186,9 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
             edit_ui(app, ctx, state, gfx);
         }
 
-        if state.persistent_settings.info_enabled
+        if state.gallery.view == PhotosView::Viewer
+            && !state.gallery.slideshow
+            && state.persistent_settings.info_enabled
             && !state.settings_enabled
             && !state.persistent_settings.zen_mode
             && state.current_image.is_some()
@@ -1160,7 +1216,10 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
                 );
                 let img_size = current_image.size_vec();
                 let scaled_to_fit = window_size.component_div(&img_size).amin();
-                state.image_geometry.scale = if state.persistent_settings.auto_scale {
+                let fill_screen = state.persistent_settings.auto_scale
+                    || (state.gallery.slideshow
+                        && state.gallery.view == PhotosView::Viewer);
+                state.image_geometry.scale = if fill_screen {
                     scaled_to_fit
                 } else {
                     scaled_to_fit.min(1.0)
@@ -1181,7 +1240,8 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
         settings_ui(app, ctx, state, gfx);
     });
 
-    if let Some(texture) = &state.current_texture.get() {
+    if state.gallery.view == PhotosView::Viewer {
+        if let Some(texture) = &state.current_texture.get() {
         // align to pixel to prevent distortion
         let aligned_offset_x = state.image_geometry.offset.x.trunc();
         let aligned_offset_y = state.image_geometry.offset.y.trunc();
@@ -1288,6 +1348,7 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
                 // }
             }
         }
+        }
     }
 
     if state.network_mode {
@@ -1354,13 +1415,20 @@ fn open_paths(state: &mut OculanteState, paths_to_open: Vec<PathBuf>) {
         if location.is_dir() {
             // Folder - Pick first image from the folder...
             if let Ok(first_img_location) = find_first_image_in_directory(&location) {
+                state.gallery.folder = location.clone();
                 state.is_loaded = false;
                 state.player.load(&first_img_location);
                 state.current_path = Some(first_img_location);
+            } else {
+                state.gallery.folder = location.clone();
+                state.gallery.needs_refresh = true;
             }
         } else {
             state.is_loaded = false;
             state.player.load(&location);
+            if let Some(parent) = location.parent() {
+                state.gallery.folder = parent.to_path_buf();
+            }
             state.current_path = Some(location);
         };
     } else if paths_to_open.len() > 1 {

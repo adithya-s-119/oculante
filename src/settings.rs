@@ -87,8 +87,8 @@ impl Default for PersistentSettings {
     fn default() -> Self {
         PersistentSettings {
             ui_scale: 1.0,
-            accent_color: [255, 0, 75],
-            background_color: [30, 30, 30],
+            accent_color: [96, 205, 255],
+            background_color: [10, 13, 20],
             vsync: true,
             force_redraw: false,
             shortcuts: Shortcuts::default_keys(),
@@ -98,7 +98,7 @@ impl Default for PersistentSettings {
             show_scrub_bar: Default::default(),
             wrap_folder: true,
             keep_edits: Default::default(),
-            title_format: "{APP} | {VERSION} | {FULLPATH}".into(),
+            title_format: "{FILENAME} - Photos".into(),
             info_enabled: Default::default(),
             edit_enabled: Default::default(),
             show_checker_background: Default::default(),
@@ -115,7 +115,7 @@ impl Default for PersistentSettings {
             zoom_multiplier: 1.0,
             auto_scale: false,
             borderless: false,
-            min_window_size: (100, 100),
+            min_window_size: (900, 600),
             experimental_features: false,
             decoders: Default::default(),
         }

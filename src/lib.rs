@@ -5,6 +5,7 @@ pub mod egui_modal;
 pub mod image_editing;
 pub mod image_loader;
 pub mod ktx2_loader;
+pub mod ml;
 pub mod settings;
 pub mod shortcuts;
 pub mod utils;
