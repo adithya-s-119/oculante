@@ -46,6 +46,292 @@ use image_editing::EditState;
 use scrubber::find_first_image_in_directory;
 use shortcuts::InputEvent::*;
 
+#[cfg(target_os = "windows")]
+static FIRST_FRAME_RENDERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+fn find_main_window() -> *mut std::ffi::c_void {
+    use std::ffi::c_void;
+    type Hwnd = *mut c_void;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(
+            callback: Option<unsafe extern "system" fn(Hwnd, isize) -> i32>,
+            lparam: isize,
+        ) -> i32;
+        fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
+        fn GetWindowTextLengthW(hwnd: Hwnd) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+
+    unsafe extern "system" fn callback(hwnd: Hwnd, lparam: isize) -> i32 {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == GetCurrentProcessId() && GetWindowTextLengthW(hwnd) > 0 {
+            *(lparam as *mut Hwnd) = hwnd;
+            return 0;
+        }
+        1
+    }
+
+    let mut hwnd: Hwnd = std::ptr::null_mut();
+    unsafe {
+        EnumWindows(Some(callback), &mut hwnd as *mut Hwnd as isize);
+    }
+    hwnd
+}
+
+/// A dark, full-screen splash covers the white surface Windows shows before
+/// the first GPU frame. It is removed as soon as Pictor has painted once.
+#[cfg(target_os = "windows")]
+fn start_splash() {
+    use std::ffi::c_void;
+    type Hwnd = *mut c_void;
+    type Hinstance = *mut c_void;
+
+    #[repr(C)]
+    struct WndClassW {
+        style: u32,
+        lpfn_wnd_proc: Option<unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize>,
+        cb_cls_extra: i32,
+        cb_wnd_extra: i32,
+        h_instance: Hinstance,
+        h_icon: *mut c_void,
+        h_cursor: *mut c_void,
+        hbr_background: *mut c_void,
+        lpsz_menu_name: *const u16,
+        lpsz_class_name: *const u16,
+    }
+    #[repr(C)]
+    struct Msg {
+        hwnd: Hwnd,
+        message: u32,
+        w_param: usize,
+        l_param: isize,
+        time: u32,
+        pt: Point,
+    }
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[repr(C)]
+    struct PaintStruct {
+        hdc: *mut c_void,
+        erase: i32,
+        paint: Rect,
+        restore: i32,
+        inc_update: i32,
+        reserved: [u8; 32],
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn RegisterClassW(class: *const WndClassW) -> u16;
+        fn CreateWindowExW(
+            ex_style: u32,
+            class: *const u16,
+            title: *const u16,
+            style: u32,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            parent: Hwnd,
+            menu: *mut c_void,
+            instance: Hinstance,
+            param: *mut c_void,
+        ) -> Hwnd;
+        fn ShowWindow(hwnd: Hwnd, cmd: i32) -> i32;
+        fn UpdateWindow(hwnd: Hwnd) -> i32;
+        fn PeekMessageW(msg: *mut Msg, hwnd: Hwnd, min: u32, max: u32, remove: u32) -> i32;
+        fn TranslateMessage(msg: *const Msg) -> i32;
+        fn DispatchMessageW(msg: *const Msg) -> isize;
+        fn DestroyWindow(hwnd: Hwnd) -> i32;
+        fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn GetSystemMetrics(index: i32) -> i32;
+        fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+        fn BeginPaint(hwnd: Hwnd, ps: *mut PaintStruct) -> *mut c_void;
+        fn EndPaint(hwnd: Hwnd, ps: *const PaintStruct) -> i32;
+        fn DrawIconEx(
+            hdc: *mut c_void,
+            x: i32,
+            y: i32,
+            icon: *mut c_void,
+            cx: i32,
+            cy: i32,
+            step: u32,
+            brush: *mut c_void,
+            flags: u32,
+        ) -> i32;
+        fn LoadIconW(instance: Hinstance, name: *const u16) -> *mut c_void;
+        fn SetBkMode(hdc: *mut c_void, mode: i32) -> i32;
+        fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
+        fn DrawTextW(
+            hdc: *mut c_void,
+            text: *const u16,
+            count: i32,
+            rect: *mut Rect,
+            flags: u32,
+        ) -> i32;
+        fn SetForegroundWindow(hwnd: Hwnd) -> i32;
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateSolidBrush(color: u32) -> *mut c_void;
+        fn CreateFontW(
+            height: i32,
+            width: i32,
+            escapement: i32,
+            orientation: i32,
+            weight: i32,
+            italic: u32,
+            underline: u32,
+            strikeout: u32,
+            charset: u32,
+            out_precision: u32,
+            clip_precision: u32,
+            quality: u32,
+            pitch: u32,
+            face: *const u16,
+        ) -> *mut c_void;
+        fn SelectObject(hdc: *mut c_void, object: *mut c_void) -> *mut c_void;
+        fn DeleteObject(object: *mut c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> Hinstance;
+    }
+
+    unsafe extern "system" fn wnd_proc(
+        hwnd: Hwnd,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        if msg == 0x000F {
+            // WM_PAINT
+            let mut ps: PaintStruct = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect: Rect = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            let icon = LoadIconW(GetModuleHandleW(std::ptr::null()), 1 as *const u16);
+            if !icon.is_null() {
+                DrawIconEx(
+                    hdc,
+                    (width - 200) / 2,
+                    (height - 200) / 2 - 60,
+                    icon,
+                    200,
+                    200,
+                    0,
+                    std::ptr::null_mut(),
+                    0x0003,
+                );
+            }
+            let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+            let font = CreateFontW(
+                -42, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr(),
+            );
+            let old = SelectObject(hdc, font);
+            SetBkMode(hdc, 1);
+            SetTextColor(hdc, 0x00FA_F3EE);
+            let text: Vec<u16> = "Pictor\0".encode_utf16().collect();
+            let mut text_rect = Rect {
+                left: 0,
+                top: height / 2 + 110,
+                right: width,
+                bottom: height / 2 + 180,
+            };
+            DrawTextW(hdc, text.as_ptr(), -1, &mut text_rect, 0x0025);
+            SelectObject(hdc, old);
+            DeleteObject(font);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+
+    std::thread::spawn(|| {
+        let class_name: Vec<u16> = "PictorSplash\0".encode_utf16().collect();
+        let title: Vec<u16> = "\0".encode_utf16().collect();
+        let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+        let class = WndClassW {
+            style: 0,
+            lpfn_wnd_proc: Some(wnd_proc),
+            cb_cls_extra: 0,
+            cb_wnd_extra: 0,
+            h_instance: instance,
+            h_icon: unsafe { LoadIconW(instance, 1 as *const u16) },
+            h_cursor: std::ptr::null_mut(),
+            hbr_background: unsafe { CreateSolidBrush(0x0014_0D0A) },
+            lpsz_menu_name: std::ptr::null(),
+            lpsz_class_name: class_name.as_ptr(),
+        };
+
+        unsafe {
+            RegisterClassW(&class);
+            let width = GetSystemMetrics(0);
+            let height = GetSystemMetrics(1);
+            let hwnd = CreateWindowExW(
+                0x0000_0008 | 0x0000_0080 | 0x0800_0000,
+                class_name.as_ptr(),
+                title.as_ptr(),
+                0x8000_0000 | 0x1000_0000,
+                0,
+                0,
+                width,
+                height,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                instance,
+                std::ptr::null_mut(),
+            );
+            if hwnd.is_null() {
+                return;
+            }
+            ShowWindow(hwnd, 4); // SW_SHOWNOACTIVATE
+            UpdateWindow(hwnd);
+
+            let start = std::time::Instant::now();
+            let mut msg: Msg = std::mem::zeroed();
+            loop {
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, 1) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                if FIRST_FRAME_RENDERED.load(std::sync::atomic::Ordering::SeqCst)
+                    || start.elapsed() > std::time::Duration::from_secs(6)
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            DestroyWindow(hwnd);
+            let main = find_main_window();
+            if !main.is_null() {
+                ShowWindow(main, 3); // SW_MAXIMIZE
+                SetForegroundWindow(main);
+            }
+        }
+    });
+}
+
 #[notan_main]
 fn main() -> Result<(), String> {
     if std::env::var("RUST_LOG").is_err() {
@@ -63,8 +349,7 @@ fn main() -> Result<(), String> {
     // any settings are loaded. On Windows this also carries the thumbnail cache.
     settings::migrate_legacy_data();
 
-    // Opening a file/folder from Explorer should fill the screen instead of
-    // inheriting Explorer's offset or a stale window position.
+    // Opening a file/folder from Explorer should fill the screen.
     let launched_with_path = std::env::args()
         .skip(1)
         .any(|arg| !arg.starts_with('-') && std::path::Path::new(&arg).exists());
@@ -165,6 +450,9 @@ fn main() -> Result<(), String> {
     window_config.max_size = None;
 
     debug!("Starting Pictor.");
+    #[cfg(target_os = "windows")]
+    start_splash();
+
     notan::init_with(init)
         .add_config(window_config)
         .add_config(EguiConfig)
@@ -1381,6 +1669,11 @@ fn drawe(app: &mut App, gfx: &mut Graphics, plugins: &mut Plugins, state: &mut O
     gfx.render(&draw);
     gfx.render(&zoom_image);
     gfx.render(&egui_output);
+
+    #[cfg(target_os = "windows")]
+    if !FIRST_FRAME_RENDERED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        debug!("First frame rendered");
+    }
 }
 
 // Make sure offset is restricted to window size so we don't offset to infinity
