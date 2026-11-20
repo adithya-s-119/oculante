@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Datelike, Local, Timelike};
@@ -22,6 +23,10 @@ const OUTER_MARGIN: f32 = 16.0;
 const CARD_GAP: f32 = 12.0;
 const MAX_SCAN_DEPTH: u8 = 4;
 const MAX_SCAN_FILES: usize = 20_000;
+/// Above this many photos we no longer start a whole-library AI pass
+/// automatically. Visible photos are still tagged lazily, and the user can
+/// explicitly ask for the full pass from the sidebar.
+const AUTO_ANALYZE_LIMIT: usize = 800;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PhotosView {
@@ -65,6 +70,13 @@ struct AnalysisItem {
     tries: u8,
 }
 
+struct ScanResult {
+    entries: Vec<GalleryEntry>,
+    folder: PathBuf,
+    filter: GalleryFilter,
+    sort_newest: bool,
+}
+
 /// State for the Photos gallery and viewer chrome. This is intentionally
 /// separate from Oculante's image state so the two can evolve independently.
 pub struct GalleryState {
@@ -95,7 +107,19 @@ pub struct GalleryState {
     picker_dirs: Vec<PathBuf>,
     picker_for: Option<PathBuf>,
     analysis_queue: VecDeque<AnalysisItem>,
+    /// Visible, already-thumbnailed photos that can be classified immediately.
+    analysis_candidates: Vec<(PathBuf, u64)>,
     pub analysis_started: bool,
+    pub analysis_all_requested: bool,
+    last_analysis_tick: Instant,
+    scanning: bool,
+    scan_rx: Option<Receiver<ScanResult>>,
+    scan_tag: Option<(PathBuf, GalleryFilter)>,
+    /// Recently used egui image textures, keyed by their `file://` URI. The
+    /// egui image loader has no eviction, which otherwise means browsing a
+    /// 20k-photo drive can consume gigabytes of GPU memory.
+    photo_textures: HashMap<String, u64>,
+    photo_texture_seq: u64,
     pub filmstrip_index: Option<usize>,
 }
 
@@ -133,7 +157,15 @@ impl Default for GalleryState {
             picker_dirs: Vec::new(),
             picker_for: None,
             analysis_queue: VecDeque::new(),
+            analysis_candidates: Vec::new(),
             analysis_started: false,
+            analysis_all_requested: false,
+            last_analysis_tick: Instant::now(),
+            scanning: false,
+            scan_rx: None,
+            scan_tag: None,
+            photo_textures: HashMap::new(),
+            photo_texture_seq: 0,
             filmstrip_index: None,
         }
     }
@@ -156,89 +188,105 @@ impl GalleryState {
         }
     }
 
-    pub fn refresh(&mut self, favourites: &HashSet<PathBuf>, recent: &VecDeque<PathBuf>) {
-        let mut paths: Vec<PathBuf> = match self.filter {
-            GalleryFilter::Collection => {
-                let mut found = Vec::new();
-                collect_images(&self.folder, 0, &mut found);
-                found
-            }
-            GalleryFilter::Favorites => favourites.iter().cloned().collect(),
-            GalleryFilter::Recent => recent.iter().cloned().collect(),
-        };
-        paths.sort();
-        paths.dedup();
+    /// Start scanning the current folder in the background. The UI keeps
+    /// rendering (and remains interactive) while a slow USB drive is indexed.
+    pub fn start_scan(&mut self, favourites: &HashSet<PathBuf>, recent: &VecDeque<PathBuf>) {
+        if self.scanning {
+            self.needs_refresh = true;
+            return;
+        }
+        let folder = self.folder.clone();
+        let filter = self.filter;
+        let newest = self.sort_newest;
+        let favourites = favourites.clone();
+        let recent = recent.clone();
+        let (tx, rx) = mpsc::channel();
 
-        let mut entries: Vec<GalleryEntry> = paths
-            .into_par_iter()
-            .filter(|p| p.is_file())
-            .map(|path| {
-                let meta = std::fs::metadata(&path).ok();
-                let modified = meta
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                let modified_ms = meta.as_ref().map(ml::modified_ms).unwrap_or_default();
-                let day_key = {
-                    let dt: DateTime<Local> = modified.into();
-                    dt.date_naive().num_days_from_ce()
-                };
-                let search_name = path.to_string_lossy().to_lowercase();
-                GalleryEntry {
-                    path,
-                    modified,
-                    modified_ms,
-                    day_key,
-                    search_name,
-                }
-            })
-            .collect();
-
-        self.sort(&mut entries);
-        self.entries = entries;
+        self.scanning = true;
         self.needs_refresh = false;
+        self.scan_rx = Some(rx);
+        self.scan_tag = Some((folder.clone(), filter));
         self.analysis_queue.clear();
+        self.analysis_candidates.clear();
         self.analysis_started = false;
-        if let Some(sel) = &self.selected {
-            if !self.entries.iter().any(|e| &e.path == sel) {
-                self.selected = None;
-            }
+        self.analysis_all_requested = false;
+
+        let spawned = std::thread::Builder::new()
+            .name("photos-scan".into())
+            .spawn(move || {
+                let entries = scan_entries(&folder, filter, &favourites, &recent, newest);
+                let _ = tx.send(ScanResult {
+                    entries,
+                    folder,
+                    filter,
+                    sort_newest: newest,
+                });
+            });
+        if spawned.is_err() {
+            self.scanning = false;
+            self.scan_rx = None;
+            self.scan_tag = None;
+            self.needs_refresh = true;
         }
     }
 
-    fn sort(&self, entries: &mut [GalleryEntry]) {
-        if self.sort_newest {
-            entries.sort_by(|a, b| {
-                b.modified
-                    .cmp(&a.modified)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-        } else {
-            entries.sort_by(|a, b| {
-                a.modified
-                    .cmp(&b.modified)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
+    /// Poll a running folder scan. This never blocks on drive I/O.
+    pub fn poll_scan(&mut self, ctx: &Context) {
+        let mut finished = None;
+        if let Some(rx) = self.scan_rx.take() {
+            match rx.try_recv() {
+                Ok(result) => finished = Some(result),
+                Err(mpsc::TryRecvError::Empty) => self.scan_rx = Some(rx),
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
         }
+
+        if let Some(result) = finished {
+            let refresh_again = self.needs_refresh;
+            let tagged_view = self
+                .scan_tag
+                .as_ref()
+                .map(|(folder, filter)| folder == &result.folder && *filter == result.filter)
+                .unwrap_or(false);
+            self.scanning = false;
+            self.scan_tag = None;
+            let same_view =
+                tagged_view && self.folder == result.folder && self.filter == result.filter;
+            if same_view {
+                self.entries = result.entries;
+                if result.sort_newest != self.sort_newest {
+                    self.sort_entries();
+                }
+                self.needs_refresh = refresh_again;
+                self.analysis_queue.clear();
+                self.analysis_candidates.clear();
+                self.analysis_started = false;
+                self.analysis_all_requested = false;
+                if let Some(sel) = &self.selected {
+                    if !self.entries.iter().any(|e| &e.path == sel) {
+                        self.selected = None;
+                    }
+                }
+            } else {
+                self.needs_refresh = true;
+            }
+        }
+
+        if self.scanning {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
+    }
+
+    fn sort_entries(&mut self) {
+        sort_entries(&mut self.entries, self.sort_newest);
     }
 
     pub fn resort(&mut self) {
-        let sort_newest = self.sort_newest;
-        if sort_newest {
-            self.entries.sort_by(|a, b| {
-                b.modified
-                    .cmp(&a.modified)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-        } else {
-            self.entries.sort_by(|a, b| {
-                a.modified
-                    .cmp(&b.modified)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-        }
+        self.sort_entries();
         self.analysis_queue.clear();
+        self.analysis_candidates.clear();
         self.analysis_started = false;
+        self.analysis_all_requested = false;
     }
 
     /// Indices into `entries` matching the current search and category filter.
@@ -613,6 +661,69 @@ fn category_matches(selected: &str, category: &str) -> bool {
     }
 }
 
+fn scan_entries(
+    folder: &Path,
+    filter: GalleryFilter,
+    favourites: &HashSet<PathBuf>,
+    recent: &VecDeque<PathBuf>,
+    sort_newest: bool,
+) -> Vec<GalleryEntry> {
+    let mut paths: Vec<PathBuf> = match filter {
+        GalleryFilter::Collection => {
+            let mut found = Vec::new();
+            collect_images(folder, 0, &mut found);
+            found
+        }
+        GalleryFilter::Favorites => favourites.iter().cloned().collect(),
+        GalleryFilter::Recent => recent.iter().cloned().collect(),
+    };
+    paths.sort();
+    paths.dedup();
+
+    let mut entries: Vec<GalleryEntry> = paths
+        .into_par_iter()
+        .filter(|p| p.is_file())
+        .map(|path| {
+            let meta = std::fs::metadata(&path).ok();
+            let modified = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let modified_ms = meta.as_ref().map(ml::modified_ms).unwrap_or_default();
+            let day_key = {
+                let dt: DateTime<Local> = modified.into();
+                dt.date_naive().num_days_from_ce()
+            };
+            let search_name = path.to_string_lossy().to_lowercase();
+            GalleryEntry {
+                path,
+                modified,
+                modified_ms,
+                day_key,
+                search_name,
+            }
+        })
+        .collect();
+    sort_entries(&mut entries, sort_newest);
+    entries
+}
+
+fn sort_entries(entries: &mut [GalleryEntry], newest: bool) {
+    if newest {
+        entries.sort_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+    } else {
+        entries.sort_by(|a, b| {
+            a.modified
+                .cmp(&b.modified)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+    }
+}
+
 fn collect_images(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
     if depth > MAX_SCAN_DEPTH || out.len() >= MAX_SCAN_FILES {
         return;
@@ -661,6 +772,13 @@ fn open_photo(state: &mut OculanteState, path: &Path) {
     state.scrubber.index = index;
     state.scrubber.fixed_paths = true;
     state.scrubber.wrap = true;
+    if state.ml.enabled {
+        if let Some(thumbnail) = state.thumbnails.existing_analysis(path) {
+            state
+                .ml
+                .request(path, &thumbnail, ml::modified_ms_for(path));
+        }
+    }
     state.current_path = Some(path.to_path_buf());
     state.current_image = None;
     state.is_loaded = false;
@@ -682,8 +800,11 @@ fn open_folder(state: &mut OculanteState, folder: PathBuf) {
     state.gallery.category = None;
     state.gallery.query.clear();
     state.gallery.needs_refresh = true;
+    state.gallery.entries.clear();
     state.gallery.analysis_started = false;
+    state.gallery.analysis_all_requested = false;
     state.gallery.analysis_queue.clear();
+    state.gallery.analysis_candidates.clear();
     state.gallery.selected = None;
     state.volatile_settings.last_open_directory = folder.clone();
     state.volatile_settings.folder_bookmarks.insert(folder);
@@ -851,17 +972,50 @@ fn paint_backdrop(ui: &Ui, state: &OculanteState, palette: Palette) {
 
 /// Entry point called from main's draw loop.
 pub fn photos_ui(ctx: &Context, app: &mut App, state: &mut OculanteState) {
+    state.gallery.photo_texture_seq = state.gallery.photo_texture_seq.wrapping_add(1);
     match state.gallery.view {
         PhotosView::Gallery => gallery_ui(ctx, app, state),
         PhotosView::Viewer => viewer_ui(ctx, app, state),
     }
+    evict_photo_textures(ctx, state);
+}
+
+const MAX_PHOTO_TEXTURES: usize = 180;
+const RETAIN_PHOTO_TEXTURES: usize = 130;
+
+fn evict_photo_textures(ctx: &Context, state: &mut OculanteState) {
+    if state.gallery.photo_textures.len() <= MAX_PHOTO_TEXTURES {
+        return;
+    }
+    let current = state.gallery.photo_texture_seq;
+    let mut stale: Vec<(String, u64)> = state
+        .gallery
+        .photo_textures
+        .iter()
+        .filter(|(_, seq)| **seq != current)
+        .map(|(uri, seq)| (uri.clone(), *seq))
+        .collect();
+    stale.sort_by_key(|(_, seq)| *seq);
+    let remove = state
+        .gallery
+        .photo_textures
+        .len()
+        .saturating_sub(RETAIN_PHOTO_TEXTURES)
+        .min(stale.len());
+    for (uri, _) in stale.into_iter().take(remove) {
+        ctx.forget_image(uri.as_str());
+        state.gallery.photo_textures.remove(&uri);
+    }
 }
 
 fn gallery_ui(ctx: &Context, _app: &mut App, state: &mut OculanteState) {
-    if state.gallery.needs_refresh {
+    state.gallery.poll_scan(ctx);
+    if state.gallery.needs_refresh && !state.gallery.scanning {
         let favourites = state.volatile_settings.favourite_images.clone();
         let recent = state.volatile_settings.recent_images.clone();
-        state.gallery.refresh(&favourites, &recent);
+        state.thumbnails.clear_known();
+        state.gallery.start_scan(&favourites, &recent);
+        ctx.request_repaint_after(Duration::from_millis(120));
     }
 
     // Keyboard: Escape clears filters, "/" or Ctrl+F focuses search, Enter
@@ -930,6 +1084,7 @@ fn gallery_ui(ctx: &Context, _app: &mut App, state: &mut OculanteState) {
     }
 
     ensure_backdrop(ctx, state);
+    state.gallery.analysis_candidates.clear();
     let palette = palette(&ctx.style().visuals, state);
 
     egui::CentralPanel::default()
@@ -1066,11 +1221,9 @@ fn top_bar(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
                     start_folder_picker(state);
                 }
                 ui.add_space(8.0);
-                let analyzed = state.gallery.analyzed_count(&state.ml);
-                let total = state.gallery.entries.len();
                 let analyzing = state.ml.enabled
                     && state.ml.error().is_none()
-                    && (state.ml.pending_len() > 0 || (!state.ml.is_ready() && analyzed < total));
+                    && (state.ml.pending_len() > 0 || !state.gallery.analysis_queue.is_empty());
                 if analyzing {
                     let (rect, _) = ui.allocate_exact_size(vec2(86.0, 24.0), Sense::hover());
                     ui.painter()
@@ -1113,140 +1266,175 @@ fn sidebar(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
     paint_glass(ui.painter(), ui.max_rect(), 18, palette, false);
     let inner = ui.max_rect().shrink2(vec2(12.0, 16.0));
     ui.allocate_new_ui(UiBuilder::new().max_rect(inner), |ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(
-                RichText::new("LIBRARY")
-                    .size(10.5)
-                    .color(palette.muted)
-                    .family(FontFamily::Name("bold".into())),
-            );
-            ui.add_space(7.0);
-
-            let favorites_count = state.volatile_settings.favourite_images.len();
-            let recent_count = state.volatile_settings.recent_images.len();
-            if nav_item(
-                ui,
-                palette,
-                HOUSE,
-                "Collection",
-                Some(state.gallery.entries.len()),
-                state.gallery.filter == GalleryFilter::Collection,
-            )
-            .clicked()
-            {
-                state.gallery.filter = GalleryFilter::Collection;
-                state.gallery.needs_refresh = true;
-                state.gallery.category = None;
-            }
-            if nav_item(
-                ui,
-                palette,
-                HEARTFILL,
-                "Favourites",
-                Some(favorites_count),
-                state.gallery.filter == GalleryFilter::Favorites,
-            )
-            .clicked()
-            {
-                state.gallery.filter = GalleryFilter::Favorites;
-                state.gallery.needs_refresh = true;
-                state.gallery.category = None;
-            }
-            if nav_item(
-                ui,
-                palette,
-                CLOCK,
-                "Recent",
-                Some(recent_count),
-                state.gallery.filter == GalleryFilter::Recent,
-            )
-            .clicked()
-            {
-                state.gallery.filter = GalleryFilter::Recent;
-                state.gallery.needs_refresh = true;
-                state.gallery.category = None;
-            }
-
-            ui.add_space(16.0);
-            ui.label(
-                RichText::new("FOLDERS")
-                    .size(10.5)
-                    .color(palette.muted)
-                    .family(FontFamily::Name("bold".into())),
-            );
-            ui.add_space(6.0);
-
-            let mut folders = Vec::new();
-            if let Some(p) = dirs::picture_dir() {
-                folders.push(("Pictures".to_string(), p));
-            }
-            if let Some(p) = dirs::desktop_dir() {
-                folders.push(("Desktop".to_string(), p));
-            }
-            if let Some(p) = dirs::download_dir() {
-                folders.push(("Downloads".to_string(), p));
-            }
-            for bookmark in &state.volatile_settings.folder_bookmarks {
-                let name = bookmark
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| bookmark.display().to_string());
-                if !folders.iter().any(|(_, p)| p == bookmark) {
-                    folders.push((name, bookmark.clone()));
-                }
-            }
-            // Keep the folder currently on screen reachable from the sidebar,
-            // even if it was opened from the command line or a file drop.
-            let current = state.gallery.folder.clone();
-            if current.is_dir() && !folders.iter().any(|(_, p)| *p == current) {
-                let name = current
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| current.display().to_string());
-                folders.insert(0, (name, current));
-            }
-
-            let mut chosen_folder = None;
-            for (name, path) in folders.iter().take(8) {
-                if folder_item(
-                    ui,
-                    palette,
-                    name,
-                    &path.display().to_string(),
-                    state.gallery.folder == *path,
-                )
-                .clicked()
-                {
-                    chosen_folder = Some(path.clone());
-                }
-            }
-            if ui
-                .add(
-                    egui::Button::new(
-                        RichText::new(format!("{PLUS}  Add folder"))
-                            .size(12.5)
-                            .color(palette.muted),
-                    )
-                    .frame(false),
-                )
-                .clicked()
-            {
-                start_folder_picker(state);
-            }
-            if let Some(path) = chosen_folder {
-                open_folder(state, path);
-            }
-
-            // Bottom: AI status card.
-            let card_h = 92.0;
-            let avail = ui.available_height();
-            if avail > card_h + 8.0 {
-                ui.add_space(avail - card_h - 8.0);
-            }
-            ai_card(ui, state, palette);
-        });
+        let card_h = ai_card_reserved_height(state);
+        let list_h = (ui.available_height() - card_h - 8.0).max(120.0);
+        ScrollArea::vertical()
+            .id_salt("photos-sidebar")
+            .max_height(list_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                sidebar_library(ui, state, palette);
+            });
+        ui.add_space(6.0);
+        ai_card(ui, state, palette);
     });
+}
+
+fn ai_card_reserved_height(state: &OculanteState) -> f32 {
+    let total = state.gallery.entries.len();
+    if state.ml.enabled
+        && state.ml.error().is_none()
+        && !state.gallery.scanning
+        && total > AUTO_ANALYZE_LIMIT
+        && !state.gallery.analysis_all_requested
+    {
+        156.0
+    } else {
+        132.0
+    }
+}
+
+fn sidebar_library(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(
+            RichText::new("LIBRARY")
+                .size(10.5)
+                .color(palette.muted)
+                .family(FontFamily::Name("bold".into())),
+        );
+        ui.add_space(7.0);
+
+        let favorites_count = state.volatile_settings.favourite_images.len();
+        let recent_count = state.volatile_settings.recent_images.len();
+        if nav_item(
+            ui,
+            palette,
+            HOUSE,
+            "Collection",
+            Some(state.gallery.entries.len()),
+            state.gallery.filter == GalleryFilter::Collection,
+        )
+        .clicked()
+        {
+            state.gallery.filter = GalleryFilter::Collection;
+            state.gallery.needs_refresh = true;
+            state.gallery.entries.clear();
+            state.gallery.category = None;
+        }
+        if nav_item(
+            ui,
+            palette,
+            HEARTFILL,
+            "Favourites",
+            Some(favorites_count),
+            state.gallery.filter == GalleryFilter::Favorites,
+        )
+        .clicked()
+        {
+            state.gallery.filter = GalleryFilter::Favorites;
+            state.gallery.needs_refresh = true;
+            state.gallery.entries.clear();
+            state.gallery.category = None;
+        }
+        if nav_item(
+            ui,
+            palette,
+            CLOCK,
+            "Recent",
+            Some(recent_count),
+            state.gallery.filter == GalleryFilter::Recent,
+        )
+        .clicked()
+        {
+            state.gallery.filter = GalleryFilter::Recent;
+            state.gallery.needs_refresh = true;
+            state.gallery.entries.clear();
+            state.gallery.category = None;
+        }
+
+        ui.add_space(16.0);
+        ui.label(
+            RichText::new("FOLDERS")
+                .size(10.5)
+                .color(palette.muted)
+                .family(FontFamily::Name("bold".into())),
+        );
+        ui.add_space(6.0);
+
+        let mut folders: Vec<(String, PathBuf)> = Vec::new();
+        if let Some(p) = dirs::picture_dir() {
+            folders.push(("Pictures".to_string(), p));
+        }
+        if let Some(p) = dirs::desktop_dir() {
+            folders.push(("Desktop".to_string(), p));
+        }
+        if let Some(p) = dirs::download_dir() {
+            folders.push(("Downloads".to_string(), p));
+        }
+        for bookmark in &state.volatile_settings.folder_bookmarks {
+            let name = bookmark
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| bookmark.display().to_string());
+            if !folders.iter().any(|(_, p)| same_path(p, bookmark)) {
+                folders.push((name, bookmark.clone()));
+            }
+        }
+        // Keep the folder currently on screen reachable from the sidebar,
+        // even if it was opened from the command line or a file drop.
+        let current = state.gallery.folder.clone();
+        if current.is_dir() && !folders.iter().any(|(_, p)| same_path(p, &current)) {
+            let name = current
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| current.display().to_string());
+            folders.insert(0, (name, current));
+        }
+
+        let mut chosen_folder = None;
+        for (name, path) in folders.iter().take(8) {
+            if folder_item(
+                ui,
+                palette,
+                name,
+                &path.display().to_string(),
+                same_path(&state.gallery.folder, path),
+            )
+            .clicked()
+            {
+                chosen_folder = Some(path.clone());
+            }
+        }
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(format!("{PLUS}  Add folder"))
+                        .size(12.5)
+                        .color(palette.muted),
+                )
+                .frame(false),
+            )
+            .clicked()
+        {
+            start_folder_picker(state);
+        }
+        if let Some(path) = chosen_folder {
+            open_folder(state, path);
+        }
+    });
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
 }
 
 fn folder_item(
@@ -1319,7 +1507,9 @@ fn ai_card(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
                 {
                     state.ml.set_enabled(enabled);
                     state.gallery.analysis_started = false;
+                    state.gallery.analysis_all_requested = false;
                     state.gallery.analysis_queue.clear();
+                    state.gallery.analysis_candidates.clear();
                     if !enabled {
                         state.gallery.category = None;
                     }
@@ -1345,6 +1535,14 @@ fn ai_card(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
             .on_hover_text(error.to_string());
             return;
         }
+        if state.gallery.scanning {
+            ui.label(
+                RichText::new("Scanning folder before tagging…")
+                    .size(10.5)
+                    .color(palette.muted),
+            );
+            return;
+        }
         if total == 0 {
             ui.label(
                 RichText::new("Nothing to analyse")
@@ -1353,6 +1551,44 @@ fn ai_card(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
             );
             return;
         }
+
+        let large = total > AUTO_ANALYZE_LIMIT;
+        if large && analyzed < total && !state.gallery.analysis_all_requested {
+            ui.label(
+                RichText::new(format!(
+                    "{} of {} tagged as you browse",
+                    number(analyzed),
+                    number(total)
+                ))
+                .size(10.5)
+                .color(palette.muted),
+            );
+            ui.add_space(6.0);
+            if pill_button(
+                ui,
+                palette,
+                format!("Analyze all {} photos", number(total)),
+                true,
+            )
+            .on_hover_text(
+                "Large folders are left alone by default to keep browsing fast. \
+                     A full pass can take a long time on a USB drive.",
+            )
+            .clicked()
+            {
+                state.gallery.analysis_all_requested = true;
+                state.gallery.analysis_started = false;
+                state.gallery.analysis_queue.clear();
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Visible photos are tagged automatically")
+                    .size(9.5)
+                    .color(palette.faint),
+            );
+            return;
+        }
+
         let still_working = !state.gallery.analysis_queue.is_empty()
             || state.ml.pending_len() > 0
             || !state.ml.is_ready();
@@ -1375,6 +1611,14 @@ fn ai_card(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
                     .fill(palette.accent)
                     .show_percentage(),
             );
+            if large {
+                ui.add_space(5.0);
+                if pill_button(ui, palette, "Stop full analysis", false).clicked() {
+                    state.gallery.analysis_all_requested = false;
+                    state.gallery.analysis_started = false;
+                    state.gallery.analysis_queue.clear();
+                }
+            }
         } else {
             ui.label(
                 RichText::new(format!("{} tagged offline", photo_count(analyzed)))
@@ -1415,7 +1659,11 @@ fn collection(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
                         .color(palette.text),
                 );
                 ui.add_space(9.0);
-                let count_text = photo_count(visible.len());
+                let count_text = if state.gallery.scanning {
+                    "Scanning…".to_string()
+                } else {
+                    photo_count(visible.len())
+                };
                 let (badge, _) = ui.allocate_exact_size(vec2(86.0, 22.0), Sense::hover());
                 ui.painter().rect_filled(
                     badge,
@@ -1496,7 +1744,9 @@ fn collection(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
         vec2(inner.width(), (inner.bottom() - grid_top).max(60.0)),
     );
     ui.allocate_new_ui(UiBuilder::new().max_rect(grid_rect), |ui| {
-        if state.gallery.entries.is_empty() {
+        if state.gallery.scanning && state.gallery.entries.is_empty() {
+            folder_loading(ui, state, palette);
+        } else if state.gallery.entries.is_empty() {
             empty_state(ui, state, palette, true);
         } else if visible.is_empty() {
             empty_state(ui, state, palette, false);
@@ -1590,6 +1840,38 @@ fn chip(
     .corner_radius(CornerRadius::same(15))
     .min_size(vec2(0.0, 30.0));
     ui.add(button)
+}
+
+fn folder_loading(ui: &mut Ui, state: &OculanteState, palette: Palette) {
+    let rect = ui.max_rect();
+    let card = Rect::from_center_size(rect.center(), vec2(rect.width().min(460.0), 170.0));
+    paint_glass(ui.painter(), card, 20, palette, false);
+    let inner = card.shrink2(vec2(28.0, 22.0));
+    ui.allocate_new_ui(UiBuilder::new().max_rect(inner), |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(12.0);
+            ui.spinner();
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Scanning folder…")
+                    .size(18.0)
+                    .family(FontFamily::Name("bold".into()))
+                    .color(palette.text),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(state.gallery.folder.display().to_string())
+                    .size(11.0)
+                    .color(palette.muted),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Large USB drives are indexed in the background.")
+                    .size(10.5)
+                    .color(palette.faint),
+            );
+        });
+    });
 }
 
 fn empty_state(ui: &mut Ui, state: &mut OculanteState, palette: Palette, folder_empty: bool) {
@@ -1815,6 +2097,7 @@ fn photo_grid(ui: &mut Ui, state: &mut OculanteState, palette: Palette, visible:
                                 palette,
                                 &path,
                                 modified,
+                                modified_ms,
                                 tile_rect,
                                 selected,
                                 favourite,
@@ -1835,6 +2118,7 @@ fn photo_tile(
     palette: Palette,
     path: &Path,
     modified: SystemTime,
+    modified_ms: u64,
     rect: Rect,
     selected: bool,
     favourite: bool,
@@ -1853,10 +2137,19 @@ fn photo_tile(
 
     match state.thumbnails.get_gallery(path) {
         Ok(thumb) => {
-            egui::Image::new(format!("file://{}", thumb.display()))
+            let uri = format!("file://{}", thumb.display());
+            egui::Image::new(uri.clone())
                 .corner_radius(CornerRadius::same(radius))
                 .show_loading_spinner(false)
                 .paint_at(ui, rect);
+            let seq = state.gallery.photo_texture_seq;
+            state.gallery.photo_textures.insert(uri, seq);
+            if state.ml.enabled && !state.ml.is_analyzed(path, modified_ms) {
+                state
+                    .gallery
+                    .analysis_candidates
+                    .push((path.to_path_buf(), modified_ms));
+            }
         }
         Err(_) => {
             ui.ctx().request_repaint_after(Duration::from_millis(180));
@@ -2025,9 +2318,39 @@ fn photo_tile(
 }
 
 fn process_analysis(ctx: &Context, state: &mut OculanteState) {
-    if !state.ml.enabled || state.gallery.view != PhotosView::Gallery {
+    if !state.ml.enabled || state.gallery.view != PhotosView::Gallery || state.gallery.scanning {
         return;
     }
+
+    let total = state.gallery.entries.len();
+    let analyze_all = total <= AUTO_ANALYZE_LIMIT || state.gallery.analysis_all_requested;
+
+    // Cheap, high-priority work: photos that are visible on screen already
+    // have a thumbnail, so they can be classified without touching the drive.
+    let candidates = std::mem::take(&mut state.gallery.analysis_candidates);
+    let mut scheduled = 0usize;
+    for (path, modified_ms) in candidates {
+        if scheduled >= 4 {
+            break;
+        }
+        if state.ml.is_analyzed(&path, modified_ms) {
+            continue;
+        }
+        if let Some(thumbnail) = state.thumbnails.existing_analysis(&path) {
+            state.ml.request(&path, &thumbnail, modified_ms);
+            scheduled += 1;
+        }
+    }
+
+    if !analyze_all {
+        // Large library: stop here. Classification happens only for photos
+        // the user has actually looked at.
+        if scheduled > 0 || state.ml.pending_len() > 0 {
+            ctx.request_repaint_after(Duration::from_millis(300));
+        }
+        return;
+    }
+
     if !state.gallery.analysis_started {
         let items = state
             .gallery
@@ -2044,37 +2367,52 @@ fn process_analysis(ctx: &Context, state: &mut OculanteState) {
         state.gallery.analysis_started = true;
     }
 
-    let mut scheduled = 0usize;
-    let mut examined = 0usize;
-    while examined < 6 && scheduled < 2 {
-        let Some(mut item) = state.gallery.analysis_queue.pop_front() else {
-            break;
-        };
-        examined += 1;
-        if state.ml.is_analyzed(&item.path, item.modified_ms) {
-            continue;
-        }
-        if item.tries > 50 {
-            continue;
-        }
-        if state.thumbnails.active_jobs() >= thumbnails::MAX_THREADS {
-            state.gallery.analysis_queue.push_front(item);
-            break;
-        }
-        match state.thumbnails.get_gallery(&item.path) {
-            Ok(thumbnail) => {
+    // Background passes are throttled, even if the pointer is generating
+    // extra frames. Keep at most a small inference backlog so "Stop" takes
+    // effect quickly even on slow CPUs.
+    if state.ml.pending_len() < 16
+        && state.gallery.last_analysis_tick.elapsed() >= Duration::from_millis(220)
+    {
+        state.gallery.last_analysis_tick = Instant::now();
+        let mut examined = 0usize;
+        while examined < 16 && scheduled < 4 {
+            let Some(mut item) = state.gallery.analysis_queue.pop_front() else {
+                break;
+            };
+            examined += 1;
+            if state.ml.is_analyzed(&item.path, item.modified_ms) || item.tries > 50 {
+                continue;
+            }
+
+            // Existing gallery/_ml thumbnails are free to use even when the
+            // thumbnail pool is completely busy.
+            if let Some(thumbnail) = state.thumbnails.existing_analysis(&item.path) {
                 state.ml.request(&item.path, &thumbnail, item.modified_ms);
                 scheduled += 1;
+                continue;
             }
-            Err(_) => {
-                item.tries += 1;
+
+            // Leave at least one worker for the visible grid. If the pool is
+            // fully busy, rotate the item and try a cached one instead.
+            if state.thumbnails.active_jobs() + 1 >= thumbnails::MAX_THREADS {
                 state.gallery.analysis_queue.push_back(item);
+                continue;
+            }
+            match state.thumbnails.get_analysis(&item.path) {
+                Ok(thumbnail) => {
+                    state.ml.request(&item.path, &thumbnail, item.modified_ms);
+                    scheduled += 1;
+                }
+                Err(_) => {
+                    item.tries += 1;
+                    state.gallery.analysis_queue.push_back(item);
+                }
             }
         }
     }
 
     if !state.gallery.analysis_queue.is_empty() || state.ml.pending_len() > 0 {
-        ctx.request_repaint_after(Duration::from_millis(140));
+        ctx.request_repaint_after(Duration::from_millis(180));
     }
 }
 
@@ -2477,10 +2815,13 @@ fn viewer_filmstrip(ctx: &Context, state: &mut OculanteState, palette: Palette) 
                                 Color32::from_gray(30),
                             );
                             if let Ok(thumb) = state.thumbnails.get(path) {
-                                egui::Image::new(format!("file://{}", thumb.display()))
+                                let uri = format!("file://{}", thumb.display());
+                                egui::Image::new(uri.clone())
                                     .corner_radius(CornerRadius::same(8))
                                     .show_loading_spinner(false)
                                     .paint_at(ui, thumb_rect);
+                                let seq = state.gallery.photo_texture_seq;
+                                state.gallery.photo_textures.insert(uri, seq);
                             } else {
                                 ui.ctx().request_repaint_after(Duration::from_millis(180));
                             }

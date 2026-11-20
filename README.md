@@ -18,9 +18,14 @@ experience while keeping Oculante's hardware-accelerated image pipeline:
   dogs, birds, insects, animals, food, vehicles, places and objects** without an
   internet connection. Results are cached per file + mtime. When the model is
   unsure, a descriptive filename can break the tie; the UI marks those results
-  as a “filename hint”.
+  as a “filename hint”. Large folders are lazy by default: visible photos are
+  tagged as you browse, and a full pass is an explicit **Analyze all** action.
 - **Photos-style viewer** — filmstrip, favourite, slideshow (3/5/10 s),
   fullscreen, zoom/pan, pixel picking, and the full Oculante edit/info panels.
+- **Built for big drives** — folder indexing runs on a worker thread so the
+  window stays responsive, thumbnail lookups are memoised (no per-frame USB
+  file opens), JPEG thumbnails use TurboJPEG DCT-scaled decoding, and the image
+  texture cache is bounded so a 20,000-photo library cannot exhaust GPU memory.
 - **Native speed** — Rust, notan, egui and wgpu/OpenGL. Lazy redraw, on-demand
   thumbnails and background decode/inference keep the UI at frame rate.
 

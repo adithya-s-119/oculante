@@ -1,11 +1,14 @@
 pub const THUMB_SIZE: [u32; 2] = [120, 90];
 /// Larger cache used by the Photos-style gallery grid.
 pub const GALLERY_THUMB_SIZE: [u32; 2] = [480, 360];
+/// Small thumbnail used for on-demand AI analysis. This is deliberately much
+/// cheaper than generating a 480x360 image for every photo on a huge drive.
+pub const ANALYSIS_THUMB_SIZE: [u32; 2] = [224, 168];
 pub const THUMB_CAPTION_HEIGHT: u32 = 24;
-pub const MAX_THREADS: usize = 6;
+pub const MAX_THREADS: usize = 4;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{create_dir_all, File},
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
@@ -22,8 +25,21 @@ use crate::image_loader::open_image;
 pub struct Thumbnails {
     /// The known thumbnail ids. This is used to avoid re-generating known thumbnails
     ids: HashSet<PathBuf>,
+    /// Memoised source -> cache path mapping. Without this, every visible tile
+    /// on a USB drive would open the source file and hash it again on every
+    /// frame just to find out whether its thumbnail exists.
+    known: HashMap<(PathBuf, String), PathBuf>,
     /// Number of thumbnails being created at a given time
     pool: Arc<Mutex<usize>>,
+}
+
+struct JobSlot(Arc<Mutex<usize>>);
+
+impl Drop for JobSlot {
+    fn drop(&mut self) {
+        let mut jobs = self.0.lock().unwrap();
+        *jobs = jobs.saturating_sub(1);
+    }
 }
 
 impl Thumbnails {
@@ -35,6 +51,40 @@ impl Thumbnails {
     /// thread and returned on a later frame.
     pub fn get_gallery<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
         self.get_sized(path, GALLERY_THUMB_SIZE, "_gallery")
+    }
+
+    /// Small thumbnail for the AI classifier. Reuses an existing gallery
+    /// thumbnail when possible, otherwise generates a cheap 224x168 copy.
+    pub fn get_analysis<P: AsRef<Path>>(&mut self, path: P) -> Result<PathBuf> {
+        if let Some(existing) = self.existing_gallery(path.as_ref()) {
+            return Ok(existing);
+        }
+        self.get_sized(path, ANALYSIS_THUMB_SIZE, "_ml")
+    }
+
+    /// True if the source already has any thumbnail the classifier can use,
+    /// without requesting any new work.
+    pub fn existing_analysis<P: AsRef<Path>>(&mut self, path: P) -> Option<PathBuf> {
+        if let Some(existing) = self.existing_gallery(path.as_ref()) {
+            return Some(existing);
+        }
+        let cached = self.known_path(path.as_ref(), "_ml");
+        cached.exists().then_some(cached)
+    }
+
+    pub fn existing_gallery<P: AsRef<Path>>(&mut self, path: P) -> Option<PathBuf> {
+        let cached = self.known_path(path.as_ref(), "_gallery");
+        cached.exists().then_some(cached)
+    }
+
+    fn known_path(&mut self, path: &Path, suffix: &str) -> PathBuf {
+        let key = (path.to_path_buf(), suffix.to_string());
+        if let Some(known) = self.known.get(&key) {
+            return known.clone();
+        }
+        let cached = get_cached_path_suffix(path, suffix);
+        self.known.insert(key, cached.clone());
+        cached
     }
 
     fn get_sized<P: AsRef<Path>>(
@@ -49,7 +99,7 @@ impl Thumbnails {
             warn!("Thumbnail cache dir missing, creating it");
             create_dir_all(&get_disk_cache_path()?)?;
         }
-        let cached_path = get_cached_path_suffix(&path, suffix);
+        let cached_path = self.known_path(path.as_ref(), suffix);
 
         // The thumbnail is missing and needs to be generated
         if !cached_path.exists() {
@@ -60,23 +110,32 @@ impl Thumbnails {
             // Reserve a worker slot *before* spawning, so a grid with hundreds
             // of visible placeholders cannot create hundreds of waiting
             // threads. Callers simply retry on a later frame.
-            {
+            let slot = {
                 let mut jobs = self.pool.lock().unwrap();
                 if *jobs >= MAX_THREADS {
                     bail!("Thumbnail pool is busy.");
                 }
                 *jobs += 1;
-            }
+                JobSlot(self.pool.clone())
+            };
             let fp = path.as_ref().to_path_buf();
-            let pool = self.pool.clone();
             let suffix = suffix.to_string();
-            std::thread::spawn(move || {
-                if let Err(e) = generate_sized(&fp, size, &suffix) {
-                    error!("Error generating thumbnail: {e}");
-                }
-                let mut jobs = pool.lock().unwrap();
-                *jobs = jobs.saturating_sub(1);
-            });
+            let spawned = std::thread::Builder::new()
+                .name("photos-thumb".into())
+                .spawn(move || {
+                    // The guard releases the slot even if a decoder panics.
+                    let _slot = slot;
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        generate_sized(&fp, size, &suffix)
+                    })) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => error!("Error generating thumbnail: {e}"),
+                        Err(_) => error!("Thumbnail decoder panicked"),
+                    }
+                });
+            if let Err(e) = spawned {
+                bail!("Could not start thumbnail worker: {e}");
+            }
             self.ids.insert(cached_path);
             bail!("Thumbnail not yet present.");
         }
@@ -86,6 +145,11 @@ impl Thumbnails {
     /// How many thumbnail jobs are currently running or queued.
     pub fn active_jobs(&self) -> usize {
         *self.pool.lock().unwrap()
+    }
+
+    /// Forget cached path lookups, e.g. after a folder refresh.
+    pub fn clear_known(&mut self) {
+        self.known.clear();
     }
 }
 
@@ -135,6 +199,17 @@ pub fn generate_sized<P: AsRef<Path>>(source_path: P, size: [u32; 2], suffix: &s
         source_path.as_ref().display(),
         dest_path.display()
     );
+
+    // JPEGs are by far the most common format on photo drives. Decode them
+    // directly at a reduced DCT scale instead of decoding 20+ megapixels and
+    // then throwing most of them away. This is 4-48x less pixel work for
+    // 480x360 / 224x168 thumbnails.
+    #[cfg(feature = "turbo")]
+    if let Some(fast) = jpeg_scaled_thumbnail(source_path.as_ref(), size) {
+        from_existing_sized(dest_path, &fast, size)?;
+        return Ok(());
+    }
+
     let f = open_image(source_path.as_ref(), None, None)?;
     let i = f.recv()?.get_image().context("Can't get buffer")?;
 
@@ -142,6 +217,47 @@ pub fn generate_sized<P: AsRef<Path>>(source_path: P, size: [u32; 2], suffix: &s
 
     from_existing_sized(dest_path, &i, size)?;
     Ok(())
+}
+
+#[cfg(feature = "turbo")]
+fn jpeg_scaled_thumbnail(source: &Path, target: [u32; 2]) -> Option<DynamicImage> {
+    let ext = source.extension()?.to_string_lossy().to_ascii_lowercase();
+    if ext != "jpg" && ext != "jpeg" {
+        return None;
+    }
+    let data = std::fs::read(source).ok()?;
+    let mut decoder = turbojpeg::Decompressor::new().ok()?;
+    let header = decoder.read_header(&data).ok()?;
+
+    // Pick the smallest supported DCT scale that still provides enough pixels
+    // for the requested crop/resize.
+    let mut best: Option<(usize, turbojpeg::ScalingFactor)> = None;
+    for factor in turbojpeg::Decompressor::supported_scaling_factors() {
+        let w = factor.scale(header.width);
+        let h = factor.scale(header.height);
+        if w >= target[0] as usize && h >= target[1] as usize {
+            let pixels = w.saturating_mul(h);
+            if best.map_or(true, |(best_pixels, _)| pixels < best_pixels) {
+                best = Some((pixels, factor));
+            }
+        }
+    }
+    let factor = best
+        .map(|(_, f)| f)
+        .unwrap_or(turbojpeg::ScalingFactor::ONE);
+    decoder.set_scaling_factor(factor).ok()?;
+    let scaled = header.scaled(factor);
+
+    let mut image = turbojpeg::Image {
+        pixels: vec![0u8; 4 * scaled.width * scaled.height],
+        width: scaled.width,
+        pitch: 4 * scaled.width,
+        height: scaled.height,
+        format: turbojpeg::PixelFormat::RGBA,
+    };
+    decoder.decompress(&data, image.as_deref_mut()).ok()?;
+    let rgba = image::RgbaImage::from_raw(scaled.width as u32, scaled.height as u32, image.pixels)?;
+    Some(DynamicImage::ImageRgba8(rgba))
 }
 
 pub fn from_existing<P: AsRef<Path>>(dest_path: P, image: &DynamicImage) -> Result<()> {

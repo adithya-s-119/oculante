@@ -129,6 +129,13 @@ struct CacheFile {
     entries: HashMap<PathBuf, MlLabel>,
 }
 
+#[derive(Serialize)]
+struct CacheFileRef<'a> {
+    version: u32,
+    model: &'a str,
+    entries: &'a HashMap<PathBuf, MlLabel>,
+}
+
 struct Request {
     source: PathBuf,
     thumbnail: PathBuf,
@@ -281,7 +288,9 @@ impl MlService {
         self.session_total = self
             .session_total
             .max(self.session_done + self.pending.len());
-        if self.dirty && self.last_save.elapsed() > Duration::from_secs(8) {
+        // Writing a 20k-entry cache on every few seconds stalls the UI. The
+        // cache is also saved on pause/exit, so a longer interval is safe.
+        if self.dirty && self.last_save.elapsed() > Duration::from_secs(45) {
             self.save();
         }
         changed
@@ -341,10 +350,10 @@ fn save_cache(path: &Path, entries: &HashMap<PathBuf, MlLabel>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let cache = CacheFile {
+    let cache = CacheFileRef {
         version: CACHE_VERSION,
-        model: MODEL_TAG.into(),
-        entries: entries.clone(),
+        model: MODEL_TAG,
+        entries,
     };
     let tmp = path.with_extension("json.tmp");
     {
