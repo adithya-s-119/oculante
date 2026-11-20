@@ -56,9 +56,10 @@ pub struct GalleryEntry {
     pub path: PathBuf,
     pub modified: SystemTime,
     pub modified_ms: u64,
-    /// Local calendar day, precomputed so date-group headers do not need to
-    /// format a date for every photo on every frame.
-    pub day_key: i32,
+    /// Local calendar date, precomputed for fast month/year filtering and
+    /// date-group headers.
+    pub year: i32,
+    pub month: u32,
     /// Lower-cased path, used for instant filename search.
     pub search_name: String,
 }
@@ -89,6 +90,8 @@ pub struct GalleryState {
     pub search_focus: bool,
     pub search_has_focus: bool,
     pub category: Option<&'static str>,
+    pub filter_year: Option<i32>,
+    pub filter_month: Option<u32>,
     pub tile_scale: f32,
     pub sort_newest: bool,
     pub selected: Option<PathBuf>,
@@ -139,6 +142,8 @@ impl Default for GalleryState {
             search_focus: false,
             search_has_focus: false,
             category: None,
+            filter_year: None,
+            filter_month: None,
             tile_scale: 0.42,
             sort_newest: true,
             selected: None,
@@ -289,13 +294,31 @@ impl GalleryState {
         self.analysis_all_requested = false;
     }
 
-    /// Indices into `entries` matching the current search and category filter.
+    fn matches_date(&self, entry: &GalleryEntry) -> bool {
+        if let Some(year) = self.filter_year {
+            if entry.year != year {
+                return false;
+            }
+        }
+        if let Some(month) = self.filter_month {
+            if entry.month != month {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Indices into `entries` matching the current date, search and category
+    /// filters.
     pub fn visible_indices(&self, ml: &MlService) -> Vec<usize> {
         let q = self.query.trim().to_lowercase();
         self.entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
+                if !self.matches_date(entry) {
+                    return false;
+                }
                 if let Some(cat) = self.category {
                     let Some(label) = ml.label_for(&entry.path, entry.modified_ms) else {
                         return false;
@@ -338,6 +361,9 @@ impl GalleryState {
     pub fn category_counts(&self, ml: &MlService) -> HashMap<&'static str, usize> {
         let mut counts: HashMap<&'static str, usize> = HashMap::new();
         for entry in &self.entries {
+            if !self.matches_date(entry) {
+                continue;
+            }
             if let Some(label) = ml.label_for(&entry.path, entry.modified_ms) {
                 *counts
                     .entry(ml::category_static(&label.category))
@@ -619,20 +645,9 @@ fn number(n: usize) -> String {
     out
 }
 
-fn day_label(time: SystemTime) -> String {
-    let now = Local::now();
+fn month_label(time: SystemTime) -> String {
     let dt: DateTime<Local> = time.into();
-    let date = dt.date_naive();
-    let today = now.date_naive();
-    if date == today {
-        "Today".into()
-    } else if today.pred_opt() == Some(date) {
-        "Yesterday".into()
-    } else if date.year() == today.year() {
-        dt.format("%B").to_string()
-    } else {
-        dt.format("%B %Y").to_string()
-    }
+    dt.format("%B %Y").to_string()
 }
 
 fn full_date(time: SystemTime) -> String {
@@ -690,16 +705,18 @@ fn scan_entries(
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let modified_ms = meta.as_ref().map(ml::modified_ms).unwrap_or_default();
-            let day_key = {
+            let (year, month) = {
                 let dt: DateTime<Local> = modified.into();
-                dt.date_naive().num_days_from_ce()
+                let date = dt.date_naive();
+                (date.year(), date.month())
             };
             let search_name = path.to_string_lossy().to_lowercase();
             GalleryEntry {
                 path,
                 modified,
                 modified_ms,
-                day_key,
+                year,
+                month,
                 search_name,
             }
         })
@@ -798,6 +815,8 @@ fn open_folder(state: &mut OculanteState, folder: PathBuf) {
     state.gallery.folder = folder.clone();
     state.gallery.filter = GalleryFilter::Collection;
     state.gallery.category = None;
+    state.gallery.filter_year = None;
+    state.gallery.filter_month = None;
     state.gallery.query.clear();
     state.gallery.needs_refresh = true;
     state.gallery.entries.clear();
@@ -1051,6 +1070,9 @@ fn gallery_ui(ctx: &Context, _app: &mut App, state: &mut OculanteState) {
             state.gallery.search_focus = true;
         } else if state.gallery.category.is_some() {
             state.gallery.category = None;
+        } else if state.gallery.filter_year.is_some() || state.gallery.filter_month.is_some() {
+            state.gallery.filter_year = None;
+            state.gallery.filter_month = None;
         }
     }
     if let Some(arrow) = arrow.filter(|_| !text_editing) {
@@ -1646,7 +1668,7 @@ fn collection(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
     let counts = state.gallery.category_counts(&state.ml);
     let inner = ui.max_rect();
     let header_h = 78.0;
-    let chips_h = if state.ml.enabled { 44.0 } else { 0.0 };
+    let chips_h = 44.0;
 
     let header_rect = Rect::from_min_size(inner.min, vec2(inner.width(), header_h));
     ui.allocate_new_ui(UiBuilder::new().max_rect(header_rect), |ui| {
@@ -1732,11 +1754,9 @@ fn collection(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
         pos2(inner.left(), header_rect.bottom()),
         vec2(inner.width(), chips_h),
     );
-    if state.ml.enabled {
-        ui.allocate_new_ui(UiBuilder::new().max_rect(chips_rect), |ui| {
-            category_chips(ui, state, palette, &counts);
-        });
-    }
+    ui.allocate_new_ui(UiBuilder::new().max_rect(chips_rect), |ui| {
+        category_chips(ui, state, palette, &counts);
+    });
 
     let grid_top = chips_rect.bottom() + 6.0;
     let grid_rect = Rect::from_min_size(
@@ -1763,17 +1783,25 @@ fn category_chips(
     counts: &HashMap<&'static str, usize>,
 ) {
     let show_counts = state.gallery.query.trim().is_empty();
+    let library_count = show_counts
+        .then_some(state.gallery.entries.len())
+        .filter(|_| state.gallery.filter_year.is_none() && state.gallery.filter_month.is_none());
     ScrollArea::horizontal()
         .auto_shrink([false, true])
         .id_salt("photos-categories")
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(1.0);
+                date_filter_button(ui, state, palette);
+                ui.add_space(2.0);
+                if !state.ml.enabled {
+                    return;
+                }
                 if chip(
                     ui,
                     palette,
                     "All",
-                    show_counts.then_some(state.gallery.entries.len()),
+                    library_count,
                     state.gallery.category.is_none(),
                 )
                 .clicked()
@@ -1811,6 +1839,201 @@ fn category_chips(
                 }
             });
         });
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+const MONTHS_SHORT: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn date_filter_label(state: &OculanteState) -> String {
+    match (state.gallery.filter_year, state.gallery.filter_month) {
+        (Some(year), Some(month)) => {
+            format!(
+                "{} {}",
+                MONTHS[(month as usize).saturating_sub(1).min(11)],
+                year
+            )
+        }
+        (Some(year), None) => year.to_string(),
+        _ => "All dates".into(),
+    }
+}
+
+fn set_date_filter(state: &mut OculanteState, year: Option<i32>, month: Option<u32>) {
+    state.gallery.filter_year = year;
+    state.gallery.filter_month = month;
+    state.gallery.selected = None;
+    state.gallery.scroll_selected = false;
+}
+
+fn date_filter_button(ui: &mut Ui, state: &mut OculanteState, palette: Palette) {
+    let active = state.gallery.filter_year.is_some() || state.gallery.filter_month.is_some();
+    let label = date_filter_label(state);
+    let response = pill_button(ui, palette, format!("{CLOCK}  {label}"), active);
+    let popup_id = Id::new("photos-date-filter-popup");
+    if response.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+
+    let mut close = false;
+    egui::popup_below_widget(
+        ui,
+        popup_id,
+        &response,
+        egui::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            ui.set_min_width(306.0);
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Filter by date")
+                        .size(13.0)
+                        .family(FontFamily::Name("bold".into()))
+                        .color(palette.text),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !active {
+                        return;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Clear").size(11.0).color(palette.muted),
+                            )
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        set_date_filter(state, None, None);
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(5.0);
+
+            let mut by_year: HashMap<i32, usize> = HashMap::new();
+            for entry in &state.gallery.entries {
+                *by_year.entry(entry.year).or_default() += 1;
+            }
+            let mut years = by_year.keys().copied().collect::<Vec<_>>();
+            years.sort_unstable_by(|a, b| b.cmp(a));
+            let default_year = years
+                .first()
+                .copied()
+                .unwrap_or_else(|| DateTime::<Local>::from(SystemTime::now()).year());
+            let selected_year = state.gallery.filter_year.unwrap_or(default_year);
+
+            let mut month_counts = [0usize; 12];
+            for entry in &state.gallery.entries {
+                if entry.year == selected_year {
+                    let m = (entry.month as usize).saturating_sub(1).min(11);
+                    month_counts[m] += 1;
+                }
+            }
+
+            ui.label(
+                RichText::new("YEAR")
+                    .size(9.5)
+                    .color(palette.muted)
+                    .family(FontFamily::Name("bold".into())),
+            );
+            ui.add_space(3.0);
+            ui.horizontal_wrapped(|ui| {
+                for year in &years {
+                    let count = by_year.get(year).copied().unwrap_or(0);
+                    if chip(
+                        ui,
+                        palette,
+                        &year.to_string(),
+                        Some(count),
+                        state.gallery.filter_year == Some(*year),
+                    )
+                    .clicked()
+                    {
+                        set_date_filter(state, Some(*year), None);
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!("MONTH · {selected_year}"))
+                    .size(9.5)
+                    .color(palette.muted)
+                    .family(FontFamily::Name("bold".into())),
+            );
+            ui.add_space(4.0);
+            egui::Grid::new("photos-date-months")
+                .num_columns(3)
+                .spacing(vec2(6.0, 6.0))
+                .show(ui, |ui| {
+                    for month in 1..=12u32 {
+                        let selected = state.gallery.filter_year == Some(selected_year)
+                            && state.gallery.filter_month == Some(month);
+                        let count = month_counts[(month as usize - 1).min(11)];
+                        if chip(
+                            ui,
+                            palette,
+                            MONTHS_SHORT[(month as usize - 1).min(11)],
+                            Some(count),
+                            selected,
+                        )
+                        .clicked()
+                        {
+                            set_date_filter(state, Some(selected_year), Some(month));
+                            close = true;
+                        }
+                        if month % 3 == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if pill_button(ui, palette, "All dates", !active).clicked() {
+                    set_date_filter(state, None, None);
+                    close = true;
+                }
+                if pill_button(
+                    ui,
+                    palette,
+                    format!("All {selected_year}"),
+                    state.gallery.filter_year == Some(selected_year)
+                        && state.gallery.filter_month.is_none(),
+                )
+                .on_hover_text("Show the whole year")
+                .clicked()
+                {
+                    set_date_filter(state, Some(selected_year), None);
+                    close = true;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if pill_button(ui, palette, "Done", false).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(2.0);
+        },
+    );
+
+    if close {
+        ui.memory_mut(|m| m.close_popup());
+    }
 }
 
 fn chip(
@@ -1890,20 +2113,28 @@ fn empty_state(ui: &mut Ui, state: &mut OculanteState, palette: Palette, folder_
                 palette.accent,
             );
             ui.add_space(64.0);
-            let (title, body) = match state.gallery.filter {
-                GalleryFilter::Favorites => (
-                    "No favourites yet",
-                    "Tap the heart on any photo to keep it here.",
-                ),
-                GalleryFilter::Recent => {
-                    ("Nothing recent yet", "Photos you open will show up here.")
-                }
-                GalleryFilter::Collection if folder_empty => (
-                    "No photos here yet",
-                    "Choose a folder, or browse to a photo to get started.",
-                ),
-                GalleryFilter::Collection => {
-                    ("No photos match", "Try another search, category or folder.")
+            let has_filters = !state.gallery.query.is_empty()
+                || state.gallery.category.is_some()
+                || state.gallery.filter_year.is_some()
+                || state.gallery.filter_month.is_some();
+            let (title, body) = if !folder_empty && has_filters {
+                ("No photos match", "Try another date, search or category.")
+            } else {
+                match state.gallery.filter {
+                    GalleryFilter::Favorites => (
+                        "No favourites yet",
+                        "Tap the heart on any photo to keep it here.",
+                    ),
+                    GalleryFilter::Recent => {
+                        ("Nothing recent yet", "Photos you open will show up here.")
+                    }
+                    GalleryFilter::Collection if folder_empty => (
+                        "No photos here yet",
+                        "Choose a folder, or browse to a photo to get started.",
+                    ),
+                    GalleryFilter::Collection => {
+                        ("No photos match", "Try another search, category or folder.")
+                    }
                 }
             };
             ui.label(
@@ -1917,7 +2148,7 @@ fn empty_state(ui: &mut Ui, state: &mut OculanteState, palette: Palette, folder_
             ui.add_space(20.0);
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 300.0).max(0.0) / 2.0);
-                if state.gallery.filter != GalleryFilter::Collection {
+                if state.gallery.filter != GalleryFilter::Collection && folder_empty {
                     if pill_button(ui, palette, "Go to collection", true).clicked() {
                         state.gallery.filter = GalleryFilter::Collection;
                         state.gallery.needs_refresh = true;
@@ -1925,10 +2156,12 @@ fn empty_state(ui: &mut Ui, state: &mut OculanteState, palette: Palette, folder_
                     if pill_button(ui, palette, "Browse files", false).clicked() {
                         browse_for_files(state);
                     }
-                } else if !state.gallery.query.is_empty() || state.gallery.category.is_some() {
+                } else if has_filters {
                     if pill_button(ui, palette, "Clear filters", true).clicked() {
                         state.gallery.query.clear();
                         state.gallery.category = None;
+                        state.gallery.filter_year = None;
+                        state.gallery.filter_month = None;
                     }
                     if pill_button(ui, palette, "Browse files", false).clicked() {
                         browse_for_files(state);
@@ -1960,11 +2193,12 @@ fn photo_grid(ui: &mut Ui, state: &mut OculanteState, palette: Palette, visible:
     state.gallery.columns = columns;
 
     let mut rows: Vec<GridRow> = Vec::new();
-    let mut current_day = i32::MIN;
+    let mut current_month = i32::MIN;
     let mut chunk_start = 0usize;
     for (pos, entry_idx) in visible.iter().enumerate() {
         let entry = &state.gallery.entries[*entry_idx];
-        if entry.day_key != current_day {
+        let month_key = entry.year * 12 + entry.month as i32;
+        if month_key != current_month {
             if pos > chunk_start {
                 rows.push(GridRow::Tiles {
                     start: chunk_start,
@@ -1972,9 +2206,9 @@ fn photo_grid(ui: &mut Ui, state: &mut OculanteState, palette: Palette, visible:
                 });
             }
             rows.push(GridRow::Header {
-                label: day_label(entry.modified),
+                label: month_label(entry.modified),
             });
-            current_day = entry.day_key;
+            current_month = month_key;
             chunk_start = pos;
         }
         if (pos - chunk_start + 1) % columns == 0 {
@@ -2009,6 +2243,8 @@ fn photo_grid(ui: &mut Ui, state: &mut OculanteState, palette: Palette, visible:
         state.gallery.folder.clone(),
         state.gallery.query.clone(),
         state.gallery.category,
+        state.gallery.filter_year,
+        state.gallery.filter_month,
         state.gallery.sort_newest,
     );
 

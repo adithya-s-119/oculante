@@ -8,8 +8,9 @@ A frosted-glass photo library and viewer, built in Rust on top of
 This fork replaces the single-image window with a Microsoft Photos Legacy–style
 experience while keeping Oculante's hardware-accelerated image pipeline:
 
-- **Collection library** — responsive photo grid grouped by date, search,
-  favourites, recent photos, folder navigation and quick folder picker.
+- **Collection library** — responsive photo grid grouped by month, a month/year
+  date picker, search, favourites, recent photos, folder navigation and quick
+  folder picker.
 - **Frosted glass everywhere** — translucent rounded cards, soft shadows,
   accent glows and a blurred-photo backdrop that updates with the photo you are
   looking at. No web view, no Electron, no composition tax.
